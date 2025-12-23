@@ -25,6 +25,29 @@ from main.library.utils import check_assets, load_audio, load_embedders_model, c
 for l in ["torch", "faiss", "omegaconf", "httpx", "httpcore", "faiss.loader", "numba.core", "urllib3", "transformers", "matplotlib"]:
     logging.getLogger(l).setLevel(logging.ERROR)
 
+def apply_echo_effect(audio, sample_rate, delay_seconds=0.25, feedback=0.35, mix=0.2, repeats=5):
+    delay_seconds = max(delay_seconds, 0.01)
+    feedback = float(np.clip(feedback, 0.0, 0.95))
+    mix = float(np.clip(mix, 0.0, 1.0))
+    repeats = max(1, int(repeats))
+
+    delay_samples = max(1, int(sample_rate * delay_seconds))
+    impulse = np.zeros(delay_samples * repeats + 1, dtype=np.float32)
+    impulse[0] = 1.0
+
+    gain = 1.0
+    for i in range(1, repeats + 1):
+        gain *= feedback
+        impulse[delay_samples * i] = gain
+
+    padded_audio = np.concatenate([audio, np.zeros(delay_samples * repeats, dtype=audio.dtype)])
+    wet = signal.lfilter(impulse, [1.0], padded_audio)
+    mixed = (1.0 - mix) * padded_audio + mix * wet
+
+    peak = np.max(np.abs(mixed)) if mixed.size else 0
+    if peak > 1.0: mixed = mixed / peak
+    return mixed
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--convert", action='store_true')
@@ -58,14 +81,18 @@ def parse_arguments():
     parser.add_argument("--proposal_pitch_threshold", type=float, default=255.0)
     parser.add_argument("--audio_processing", type=lambda x: bool(strtobool(x)), default=False)
     parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--echo", type=lambda x: bool(strtobool(x)), default=False)
+    parser.add_argument("--echo_delay_seconds", type=float, default=0.25)
+    parser.add_argument("--echo_feedback", type=float, default=0.35)
+    parser.add_argument("--echo_mix", type=float, default=0.2)
 
     return parser.parse_args()
 
 def main():
     args = parse_arguments()
-    pitch, filter_radius, index_rate, rms_mix_rate, protect, hop_length, f0_method, input_path, output_path, pth_path, index_path, f0_autotune, f0_autotune_strength, clean_audio, clean_strength, export_format, embedder_model, resample_sr, split_audio, checkpointing, f0_file, f0_onnx, embedders_mode, formant_shifting, formant_qfrency, formant_timbre, proposal_pitch, proposal_pitch_threshold, audio_processing, alpha = args.pitch, args.filter_radius, args.index_rate, args.rms_mix_rate,args.protect, args.hop_length, args.f0_method, args.input_path, args.output_path, args.pth_path, args.index_path, args.f0_autotune, args.f0_autotune_strength, args.clean_audio, args.clean_strength, args.export_format, args.embedder_model, args.resample_sr, args.split_audio, args.checkpointing, args.f0_file, args.f0_onnx, args.embedders_mode, args.formant_shifting, args.formant_qfrency, args.formant_timbre, args.proposal_pitch, args.proposal_pitch_threshold, args.audio_processing, args.alpha
+    pitch, filter_radius, index_rate, rms_mix_rate, protect, hop_length, f0_method, input_path, output_path, pth_path, index_path, f0_autotune, f0_autotune_strength, clean_audio, clean_strength, export_format, embedder_model, resample_sr, split_audio, checkpointing, f0_file, f0_onnx, embedders_mode, formant_shifting, formant_qfrency, formant_timbre, proposal_pitch, proposal_pitch_threshold, audio_processing, alpha, echo, echo_delay_seconds, echo_feedback, echo_mix = args.pitch, args.filter_radius, args.index_rate, args.rms_mix_rate,args.protect, args.hop_length, args.f0_method, args.input_path, args.output_path, args.pth_path, args.index_path, args.f0_autotune, args.f0_autotune_strength, args.clean_audio, args.clean_strength, args.export_format, args.embedder_model, args.resample_sr, args.split_audio, args.checkpointing, args.f0_file, args.f0_onnx, args.embedders_mode, args.formant_shifting, args.formant_qfrency, args.formant_timbre, args.proposal_pitch, args.proposal_pitch_threshold, args.audio_processing, args.alpha, args.echo, args.echo_delay_seconds, args.echo_feedback, args.echo_mix
     
-    run_convert_script(pitch=pitch, filter_radius=filter_radius, index_rate=index_rate, rms_mix_rate=rms_mix_rate, protect=protect, hop_length=hop_length, f0_method=f0_method, input_path=input_path, output_path=output_path, pth_path=pth_path, index_path=index_path, f0_autotune=f0_autotune, f0_autotune_strength=f0_autotune_strength, clean_audio=clean_audio, clean_strength=clean_strength, export_format=export_format, embedder_model=embedder_model, resample_sr=resample_sr, split_audio=split_audio, checkpointing=checkpointing, f0_file=f0_file, f0_onnx=f0_onnx, embedders_mode=embedders_mode, formant_shifting=formant_shifting, formant_qfrency=formant_qfrency, formant_timbre=formant_timbre, proposal_pitch=proposal_pitch, proposal_pitch_threshold=proposal_pitch_threshold, audio_processing=audio_processing, alpha=alpha)
+    run_convert_script(pitch=pitch, filter_radius=filter_radius, index_rate=index_rate, rms_mix_rate=rms_mix_rate, protect=protect, hop_length=hop_length, f0_method=f0_method, input_path=input_path, output_path=output_path, pth_path=pth_path, index_path=index_path, f0_autotune=f0_autotune, f0_autotune_strength=f0_autotune_strength, clean_audio=clean_audio, clean_strength=clean_strength, export_format=export_format, embedder_model=embedder_model, resample_sr=resample_sr, split_audio=split_audio, checkpointing=checkpointing, f0_file=f0_file, f0_onnx=f0_onnx, embedders_mode=embedders_mode, formant_shifting=formant_shifting, formant_qfrency=formant_qfrency, formant_timbre=formant_timbre, proposal_pitch=proposal_pitch, proposal_pitch_threshold=proposal_pitch_threshold, audio_processing=audio_processing, alpha=alpha, echo=echo, echo_delay_seconds=echo_delay_seconds, echo_feedback=echo_feedback, echo_mix=echo_mix)
 
 def run_convert_script(
     pitch=0, 
@@ -97,7 +124,11 @@ def run_convert_script(
     proposal_pitch=False, 
     proposal_pitch_threshold=255.0, 
     audio_processing=False,
-    alpha=0.5
+    alpha=0.5,
+    echo=False,
+    echo_delay_seconds=0.25,
+    echo_feedback=0.35,
+    echo_mix=0.2
 ):
     check_assets(f0_method, embedder_model, f0_onnx=f0_onnx, embedders_mode=embedders_mode)
     log_data = {
@@ -177,7 +208,11 @@ def run_convert_script(
             proposal_pitch=proposal_pitch, 
             proposal_pitch_threshold=proposal_pitch_threshold,
             audio_processing=audio_processing,
-            alpha=alpha
+            alpha=alpha,
+            echo=echo,
+            echo_delay_seconds=echo_delay_seconds,
+            echo_feedback=echo_feedback,
+            echo_mix=echo_mix
         )
 
     if os.path.isdir(input_path):
@@ -232,7 +267,7 @@ class VoiceConverter:
         self.sid = sid
         self.get_vc(model_path, sid)
 
-    def convert_audio(self, audio_input_path, audio_output_path, index_path, embedder_model, pitch, f0_method, index_rate, rms_mix_rate, protect, hop_length, f0_autotune, f0_autotune_strength, filter_radius, clean_audio, clean_strength, export_format, resample_sr = 0, checkpointing = False, f0_file = None, f0_onnx = False, embedders_mode = "fairseq", formant_shifting = False, formant_qfrency = 0.8, formant_timbre = 0.8, split_audio = False, proposal_pitch = False, proposal_pitch_threshold = 0, audio_processing = False, alpha = 0.5):
+    def convert_audio(self, audio_input_path, audio_output_path, index_path, embedder_model, pitch, f0_method, index_rate, rms_mix_rate, protect, hop_length, f0_autotune, f0_autotune_strength, filter_radius, clean_audio, clean_strength, export_format, resample_sr = 0, checkpointing = False, f0_file = None, f0_onnx = False, embedders_mode = "fairseq", formant_shifting = False, formant_qfrency = 0.8, formant_timbre = 0.8, split_audio = False, proposal_pitch = False, proposal_pitch_threshold = 0, audio_processing = False, alpha = 0.5, echo = False, echo_delay_seconds = 0.25, echo_feedback = 0.35, echo_mix = 0.2):
         self.checkpointing = checkpointing
 
         try:
@@ -312,6 +347,9 @@ class VoiceConverter:
                 if len(audio) / self.sample_rate > len(audio_output) / self.tgt_sr:
                     padding = np.zeros(int(np.round(len(audio) / self.sample_rate * self.tgt_sr) - len(audio_output)), dtype=audio_output.dtype)
                     audio_output = np.concatenate([audio_output, padding])
+
+                if echo:
+                    audio_output = apply_echo_effect(audio_output, self.tgt_sr, delay_seconds=echo_delay_seconds, feedback=echo_feedback, mix=echo_mix)
 
                 try:
                     sf.write(audio_output_path, audio_output, self.tgt_sr, format=export_format)

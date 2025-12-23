@@ -108,7 +108,18 @@ def check_assets(f0_method, hubert, f0_onnx=False, embedders_mode="fairseq"):
     
 def check_spk_diarization(model_size, speechbrain=True):
     whisper_model = os.path.join(configs["speaker_diarization_path"], "models", f"{model_size}.pt")
-    if not os.path.exists(whisper_model): huggingface.HF_download_file("".join([codecs.decode("uggcf://uhttvatsnpr.pb/NauC/Ivrganzrfr-EIP-Cebwrpg/erfbyir/znva/fcrnxre_qvnevmngvba/", "rot13"), model_size, ".pt"]), whisper_model)
+    if not os.path.exists(whisper_model):
+        huggingface.HF_download_file("".join([codecs.decode("uggcf://uhttvatsnpr.pb/NauC/Ivrganzrfr-EIP-Cebwrpg/erfbyir/znva/fcrnxre_qvnevmngvba/", "rot13"), model_size, ".pt"]), whisper_model)
+    else:
+        # Kiểm tra file có hợp lệ không (ít nhất > 1MB)
+        file_size = os.path.getsize(whisper_model)
+        min_sizes = {"tiny": 75*1024*1024, "base": 150*1024*1024, "small": 460*1024*1024, "medium": 1400*1024*1024, "large": 2800*1024*1024}
+        min_size = min_sizes.get(model_size.split("-")[0].split(".")[0], 10*1024*1024)  # Default 10MB
+        
+        if file_size < min_size * 0.5:  # Nếu file < 50% kích thước mong đợi, có thể bị hỏng
+            logger.warning(f"File mô hình {whisper_model} có vẻ không đầy đủ ({file_size / (1024*1024):.2f} MB). Đang tải lại...")
+            os.remove(whisper_model)
+            huggingface.HF_download_file("".join([codecs.decode("uggcf://uhttvatsnpr.pb/NauC/Ivrganzrfr-EIP-Cebwrpg/erfbyir/znva/fcrnxre_qvnevmngvba/", "rot13"), model_size, ".pt"]), whisper_model)
 
     speechbrain_path = os.path.join(configs["speaker_diarization_path"], "models", "speechbrain")
     if not os.path.exists(speechbrain_path): os.makedirs(speechbrain_path, exist_ok=True)

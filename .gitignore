@@ -21,8 +21,22 @@
 *.nbc
 *.nbi
 
-audios
-dataset
+# Virtual env & editor caches
+env/
+.cursor/
+.DS_Store
+
+# App outputs / temp data
+ass/
+audios/
+dataset/
 assets/logs
 assets/models
 assets/weights
+assets/binary/
+assets/presets/
+assets/zluda/
+assets/spreadsheet.csv
+
+# Local configs / runtime
+main/configs/config.json

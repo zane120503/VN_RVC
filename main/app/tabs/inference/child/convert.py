@@ -54,6 +54,12 @@ def convert_tab():
                     export_format = gr.Radio(label=translations["export_format"], info=translations["export_info"], choices=export_format_choices, value="wav", interactive=True)
                     input_audio0 = gr.Dropdown(label=translations["audio_path"], value="", choices=paths_for_files, info=translations["provide_audio"], allow_custom_value=True, interactive=True)
                     output_audio = gr.Textbox(label=translations["output_path"], value="audios/output.wav", placeholder="audios/output.wav", info=translations["output_path_info"], interactive=True)
+                    mix_beat = gr.Checkbox(label="Ghép với beat (input beat riêng)", value=False, interactive=True, visible=not use_audio.value)
+                    beat_file = gr.File(label="File beat", file_types=[".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".alac", ".wma"], visible=False)
+                    mix_auto_gain = gr.Checkbox(label="Tự cân bằng âm lượng (vocal theo beat)", value=True, interactive=True, visible=False)
+                    add_echo = gr.Checkbox(label=translations["add_echo_before_mix"], value=False, interactive=True, visible=False)
+                    echo_wet = gr.Slider(label=translations["echo_wet"], info=translations["echo_wet_info"], minimum=0, maximum=1, step=0.05, value=0.25, interactive=True, visible=False)
+                    echo_delay = gr.Slider(label=translations["echo_delay_ms"], info=translations["echo_delay_ms_info"], minimum=50, maximum=1500, step=25, value=300, interactive=True, visible=False)
                 with gr.Column():
                     refresh0 = gr.Button(translations["refresh"])
             with gr.Accordion(translations["setting"], open=False):
@@ -127,6 +133,8 @@ def convert_tab():
     with gr.Row():
         original_convert = gr.Audio(show_download_button=True, interactive=False, label=translations["convert_original"], visible=use_original.value)
         vocal_instrument = gr.Audio(show_download_button=True, interactive=False, label=translations["voice_or_instruments"], visible=merge_instrument.value)  
+    with gr.Row():
+        mix_output = gr.Audio(show_download_button=True, interactive=False, label="Giọng + Beat", visible=False)
     with gr.Row():
         upload_f0_file.upload(fn=lambda inp: shutil_move(inp.name, configs["f0_path"]), inputs=[upload_f0_file], outputs=[f0_file_dropdown])
         refresh_f0_file.click(fn=change_f0_choices, inputs=[], outputs=[f0_file_dropdown])
@@ -209,7 +217,16 @@ def convert_tab():
     with gr.Row():
         upload_presets.upload(fn=lambda presets_in: [shutil_move(preset.name, configs["presets_path"]) for preset in presets_in][0], inputs=[upload_presets], outputs=[presets_name])
         autotune.change(fn=visible, inputs=[autotune], outputs=[f0_autotune_strength])
-        use_audio.change(fn=lambda a: [visible(a), visible(a), visible(a), visible(a), visible(a), valueFalse_interactive(a), valueFalse_interactive(a), valueFalse_interactive(a), valueFalse_interactive(a), visible(not a), visible(not a), visible(not a), visible(not a)], inputs=[use_audio], outputs=[main_backing, use_original, convert_backing, not_merge_backing, merge_instrument, use_original, convert_backing, not_merge_backing, merge_instrument, input_audio0, output_audio, input0, play_audio])
+        use_audio.change(
+            fn=lambda a: [
+                visible(a), visible(a), visible(a), visible(a), visible(a),
+                valueFalse_interactive(a), valueFalse_interactive(a), valueFalse_interactive(a), valueFalse_interactive(a),
+                visible(not a), visible(not a), visible(not a), visible(not a),
+                visible(not a), visible(False), visible(False), visible(False), visible(False), visible(False), visible(False)
+            ],
+            inputs=[use_audio],
+            outputs=[main_backing, use_original, convert_backing, not_merge_backing, merge_instrument, use_original, convert_backing, not_merge_backing, merge_instrument, input_audio0, output_audio, input0, play_audio, mix_beat, beat_file, mix_output, mix_auto_gain, add_echo, echo_wet, echo_delay]
+        )
     with gr.Row():
         convert_backing.change(fn=lambda a,b: [change_backing_choices(a, b), visible(a)], inputs=[convert_backing, not_merge_backing], outputs=[use_original, backing_convert])
         use_original.change(fn=lambda audio, original: [visible(original), visible(not original), visible(audio and not original), valueFalse_interactive(not original), valueFalse_interactive(not original)], inputs=[use_audio, use_original], outputs=[original_convert, main_convert, main_backing, convert_backing, not_merge_backing])
@@ -236,6 +253,14 @@ def convert_tab():
     with gr.Row():
         proposal_pitch.change(fn=visible, inputs=[proposal_pitch], outputs=[proposal_pitch_threshold])
         embed_mode.change(fn=change_embedders_mode, inputs=[embed_mode], outputs=[embedders])
+        mix_beat.change(fn=visible, inputs=[mix_beat], outputs=[beat_file])
+        mix_beat.change(fn=visible, inputs=[mix_beat], outputs=[mix_output])
+        mix_beat.change(fn=visible, inputs=[mix_beat], outputs=[mix_auto_gain])
+        mix_beat.change(fn=visible, inputs=[mix_beat], outputs=[add_echo])
+        mix_beat.change(fn=visible, inputs=[mix_beat], outputs=[echo_wet])
+        mix_beat.change(fn=visible, inputs=[mix_beat], outputs=[echo_delay])
+        add_echo.change(fn=visible, inputs=[add_echo], outputs=[echo_wet])
+        add_echo.change(fn=visible, inputs=[add_echo], outputs=[echo_delay])
     with gr.Row():
         convert_button.click(
             fn=convert_selection,
@@ -276,9 +301,15 @@ def convert_tab():
                 proposal_pitch,
                 proposal_pitch_threshold,
                 audio_processing,
-                alpha
+                alpha,
+                mix_beat,
+                beat_file,
+                mix_auto_gain,
+                add_echo,
+                echo_wet,
+                echo_delay
             ],
-            outputs=[audio_select, main_convert, backing_convert, main_backing, original_convert, vocal_instrument, convert_button, convert_button_2],
+            outputs=[audio_select, main_convert, backing_convert, main_backing, original_convert, vocal_instrument, convert_button, convert_button_2, mix_output],
             api_name="convert_selection"
         )
         convert_button_2.click(
@@ -321,8 +352,14 @@ def convert_tab():
                 proposal_pitch,
                 proposal_pitch_threshold,
                 audio_processing,
-                alpha
+                alpha,
+                mix_beat,
+                beat_file,
+                mix_auto_gain,
+                add_echo,
+                echo_wet,
+                echo_delay
             ],
-            outputs=[main_convert, backing_convert, main_backing, original_convert, vocal_instrument, convert_button],
+            outputs=[main_convert, backing_convert, main_backing, original_convert, vocal_instrument, convert_button, mix_output],
             api_name="convert_audio"
         )

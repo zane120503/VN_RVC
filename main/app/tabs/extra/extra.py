@@ -11,6 +11,7 @@ from main.app.tabs.extra.child.settings import settings_tab
 from main.app.tabs.extra.child.read_model import read_model_tab
 from main.app.tabs.extra.child.f0_extract import f0_extract_tab
 from main.app.tabs.extra.child.create_srt import create_srt_tab
+from main.app.tabs.extra.child.create_ass import create_ass_tab
 from main.app.tabs.extra.child.convert_model import convert_model_tab
 
 def extra_tab(app):
@@ -34,6 +35,10 @@ def extra_tab(app):
         with gr.TabItem(translations["create_srt_tab"], visible=configs.get("create_srt_tab", True)):
             gr.Markdown(translations["create_srt_markdown"])
             create_srt_tab()
+
+        with gr.TabItem("Tạo ASS", visible=configs.get("create_ass_tab", True)):
+            gr.Markdown("Tạo file ASS với word timestamps (karaoke format)")
+            create_ass_tab()
 
         with gr.TabItem(translations["settings"], visible=configs.get("settings_tab", True)):
             gr.Markdown(translations["settings_markdown"])

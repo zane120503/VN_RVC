@@ -49,15 +49,40 @@ def convert(pitch, filter_radius, index_rate, rms_mix_rate, protect, hop_length,
         "--alpha", str(alpha)
     ])
 
-def convert_audio(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, input, output, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, input_audio_name, checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing=False, alpha=0.5):
+def apply_echo_to_file(audio_path, wet_level=0.25, delay_ms=300):
+    try:
+        from pydub import AudioSegment
+        from main.library.utils import pydub_load
+
+        wet = max(0.0, min(1.0, wet_level if wet_level is not None else 0.0))
+        delay = max(10, int(delay_ms if delay_ms is not None else 300))
+
+        seg = pydub_load(audio_path, volume=None)
+        echo_gain = -12 + wet * 6  # nhẹ, giữ lời rõ
+
+        combined = seg.overlay(seg.apply_gain(echo_gain), position=delay)
+        combined = combined.overlay(seg.apply_gain(echo_gain - 3), position=delay * 2)
+
+        ext = os.path.splitext(audio_path)[1].replace(".", "") or "wav"
+        combined.export(audio_path, format=ext)
+        return audio_path
+    except Exception as e:
+        logger.warning(f"Không thể thêm echo: {e}")
+        return audio_path
+
+
+def convert_audio(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, input, output, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, input_audio_name, checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing=False, alpha=0.5, mix_beat=False, beat_file=None, mix_auto_gain=True, add_echo=False, echo_wet=0.25, echo_delay_ms=300):
     model_path = os.path.join(configs["weights_path"], model) if not os.path.exists(model) else model
 
-    return_none = [None]*6
+    return_none = [None]*7
     return_none[5] = {"visible": True, "__type__": "update"}
 
     if not use_audio:
         if merge_instrument or not_merge_backing or convert_backing or use_original:
             gr_warning(translations["turn_on_use_audio"])
+            return return_none
+        if mix_beat and not beat_file:
+            gr_warning("Bật ghép beat nhưng chưa chọn file beat.")
             return return_none
 
     if use_original:
@@ -75,6 +100,9 @@ def convert_audio(clean, autotune, use_audio, use_original, convert_backing, not
     f0method, embedder_model = (method if method != "hybrid" else hybrid_method), (embedders if embedders != "custom" else custom_embedders)
 
     if use_audio:
+        if mix_beat:
+            gr_warning("Ghép beat chỉ dùng khi KHÔNG bật 'Sử dụng tệp đã tách'.")
+            return return_none
         output_audio = os.path.join(configs["audios_path"], input_audio_name)
 
         from main.library.utils import pydub_load
@@ -164,7 +192,15 @@ def convert_audio(clean, autotune, use_audio, use_original, convert_backing, not
         except:
             return return_none
 
-        return [(None if use_original else output_path), output_backing, (None if not_merge_backing and use_original else output_merge_backup), (output_path if use_original else None), (output_merge_instrument if merge_instrument else None), {"visible": True, "__type__": "update"}]
+        return [
+            (None if use_original else output_path),
+            output_backing,
+            (None if not_merge_backing and use_original else output_merge_backup),
+            (output_path if use_original else None),
+            (output_merge_instrument if merge_instrument else None),
+            {"visible": True, "__type__": "update"},
+            None  # mix_output placeholder (không dùng trong chế độ use_audio)
+        ]
     else:
         if not input or not os.path.exists(input): 
             gr_warning(translations["input_not_valid"])
@@ -203,10 +239,46 @@ def convert_audio(clean, autotune, use_audio, use_original, convert_backing, not
 
             gr_info(translations["convert_success"])
 
-            return_none[0] = output
+            vocal_output = output
+            mix_result = None
+
+            # Ghép beat nếu được yêu cầu
+            if mix_beat and beat_file:
+                beat_path = beat_file if isinstance(beat_file, str) else getattr(beat_file, "name", None)
+                if not beat_path or not os.path.exists(beat_path):
+                    gr_warning("Không tìm thấy file beat. Bỏ qua ghép beat.")
+                else:
+                    try:
+                        from main.library.utils import pydub_load
+
+                        mixed_name, ext = os.path.splitext(output)
+                        if not ext: ext = f".{format}"
+                        mixed_output = process_output(f"{mixed_name}_mix{ext}")
+
+                        if add_echo:
+                            output = apply_echo_to_file(output, echo_wet, echo_delay_ms)
+
+                        gr_info("Đang ghép beat với giọng đã đổi...")
+                        beat_seg = pydub_load(beat_path, volume=-3)
+                        vocal_seg = pydub_load(output, volume=None)
+
+                        # Cân bằng âm lượng vocal theo beat nếu bật
+                        if mix_auto_gain:
+                            if beat_seg.dBFS is not None and vocal_seg.dBFS is not None:
+                                gain = beat_seg.dBFS - vocal_seg.dBFS
+                                vocal_seg = vocal_seg.apply_gain(gain)
+
+                        beat_seg.overlay(vocal_seg).export(mixed_output, format=format)
+                        gr_info("Ghép beat thành công.")
+                        mix_result = mixed_output
+                    except Exception as e:
+                        gr_warning(f"Lỗi khi ghép beat: {e}")
+
+            return_none[0] = vocal_output
+            return_none[6] = mix_result
             return return_none
 
-def convert_selection(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, input, output, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing=False, alpha=0.5):
+def convert_selection(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, input, output, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing=False, alpha=0.5, mix_beat=False, beat_file=None, mix_auto_gain=True, add_echo=False, echo_wet=0.25, echo_delay_ms=300):
     if use_audio:
         gr_info(translations["search_separate"])
         choice = [f for f in os.listdir(configs["audios_path"]) if os.path.isdir(os.path.join(configs["audios_path"], f))] if config.debug_mode else [f for f in os.listdir(configs["audios_path"]) if os.path.isdir(os.path.join(configs["audios_path"], f)) and any(file.lower().endswith((".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".mp4", ".aac", ".alac", ".wma", ".aiff", ".webm", ".ac3")) for file in os.listdir(os.path.join(configs["audios_path"], f)))]
@@ -216,27 +288,32 @@ def convert_selection(clean, autotune, use_audio, use_original, convert_backing,
         if len(choice) == 0: 
             gr_warning(translations["separator==0"])
 
-            return [{"choices": [], "value": "", "interactive": False, "visible": False, "__type__": "update"}, None, None, None, None, None, {"visible": True, "__type__": "update"}, {"visible": False, "__type__": "update"}]
+            return [{"choices": [], "value": "", "interactive": False, "visible": False, "__type__": "update"}, None, None, None, None, None, {"visible": True, "__type__": "update"}, {"visible": False, "__type__": "update"}, None]
         elif len(choice) == 1:
-            convert_output = convert_audio(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, None, None, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, choice[0], checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing, alpha)
+            convert_output = convert_audio(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, None, None, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, choice[0], checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing, alpha, mix_beat, beat_file, mix_auto_gain, add_echo, echo_wet, echo_delay_ms)
 
-            return [{"choices": [], "value": "", "interactive": False, "visible": False, "__type__": "update"}, convert_output[0], convert_output[1], convert_output[2], convert_output[3], convert_output[4], {"visible": True, "__type__": "update"}, {"visible": False, "__type__": "update"}]
-        else: return [{"choices": choice, "value": choice[0], "interactive": True, "visible": True, "__type__": "update"}, None, None, None, None, None, {"visible": False, "__type__": "update"}, {"visible": True, "__type__": "update"}]
+            return [{"choices": [], "value": "", "interactive": False, "visible": False, "__type__": "update"}, convert_output[0], convert_output[1], convert_output[2], convert_output[3], convert_output[4], {"visible": True, "__type__": "update"}, {"visible": False, "__type__": "update"}, convert_output[6]]
+        else: return [{"choices": choice, "value": choice[0], "interactive": True, "visible": True, "__type__": "update"}, None, None, None, None, None, {"visible": False, "__type__": "update"}, {"visible": True, "__type__": "update"}, None]
     else:
-        main_convert = convert_audio(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, input, output, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, None, checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing, alpha)
+        main_convert = convert_audio(clean, autotune, use_audio, use_original, convert_backing, not_merge_backing, merge_instrument, pitch, clean_strength, model, index, index_rate, input, output, format, method, hybrid_method, hop_length, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, split_audio, f0_autotune_strength, None, checkpointing, onnx_f0_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, embedders_mode, proposal_pitch, proposal_pitch_threshold, audio_processing, alpha, mix_beat, beat_file, mix_auto_gain, add_echo, echo_wet, echo_delay_ms)
 
-        return [{"choices": [], "value": "", "interactive": False, "visible": False, "__type__": "update"}, main_convert[0], None, None, None, None, {"visible": True, "__type__": "update"}, {"visible": False, "__type__": "update"}]
+        return [{"choices": [], "value": "", "interactive": False, "visible": False, "__type__": "update"}, main_convert[0], None, None, None, None, {"visible": True, "__type__": "update"}, {"visible": False, "__type__": "update"}, main_convert[6]]
 
 def whisper_process(model_size, input_audio, configs, device, out_queue, word_timestamps=True):
     from main.library.speaker_diarization.whisper import load_model
 
+    segments = None
     try:
-        segments = load_model(model_size, device=device).transcribe(input_audio, fp16=configs.get("fp16", False), word_timestamps=word_timestamps)
-        out_queue.put(segments["segments"])
+        model = load_model(model_size, device=device)
+        result = model.transcribe(input_audio, fp16=configs.get("fp16", False), word_timestamps=word_timestamps)
+        segments = result["segments"]
+        out_queue.put(segments)
     except Exception as e:
+        logger.error(f"Lỗi khi xử lý Whisper: {e}")
         out_queue.put(e)
     finally:
-        del segments
+        if segments is not None:
+            del segments
         gc.collect()
 
 def convert_with_whisper(num_spk, model_size, cleaner, clean_strength, autotune, f0_autotune_strength, checkpointing, model_1, model_2, model_index_1, model_index_2, pitch_1, pitch_2, index_strength_1, index_strength_2, export_format, input_audio, output_audio, onnx_f0_mode, method, hybrid_method, hop_length, embed_mode, embedders, custom_embedders, resample_sr, filter_radius, rms_mix_rate, protect, formant_shifting, formant_qfrency_1, formant_timbre_1, formant_qfrency_2, formant_timbre_2, proposal_pitch, proposal_pitch_threshold, audio_processing=False, alpha=0.5):
