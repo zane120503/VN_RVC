@@ -444,7 +444,7 @@ with gr.Blocks(
     theme=theme, 
     css="<style> @import url('{fonts}'); * {{font-family: 'Courgette', cursive !important;}} body, html {{font-family: 'Courgette', cursive !important;}} h1, h2, h3, h4, h5, h6, p, button, input, textarea, label, span, div, select {{font-family: 'Courgette', cursive !important;}} </style>".format(fonts=font or "https://fonts.googleapis.com/css2?family=Courgette&display=swap")
 ) as app:
-    gr.HTML("<h1 style='text-align: center;'>🎵VIETNAMESE RVC BY ANH🎵</h1>")
+    gr.HTML("<h1 style='text-align: center;'>🎵VIETNAMESE RVC🎵</h1>")
     gr.HTML(f"<h3 style='text-align: center;'>{translations['title']}</h3>")
 
     with gr.Tabs():      
@@ -462,15 +462,6 @@ with gr.Blocks(
         download_tab()
         extra_tab(app)
 
-    with gr.Row(): 
-        gr.Markdown(translations["rick_roll"].format(rickroll=codecs.decode('uggcf://jjj.lbhghor.pbz/jngpu?i=qDj4j9JtKpD', 'rot13')))
-
-    with gr.Row(): 
-        gr.Markdown(translations["terms_of_use"])
-
-    with gr.Row():
-        gr.Markdown(translations["exemption"])
-    
     if __name__ == "__main__":
         logger.info(config.device.replace("privateuseone", "dml"))
         logger.info(translations["start_app"])
