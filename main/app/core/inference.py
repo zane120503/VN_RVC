@@ -14,6 +14,18 @@ from main.app.variables import logger, config, configs, translations, python
 from main.app.core.ui import gr_info, gr_warning, gr_error, process_output, replace_export_format
 
 def convert(pitch, filter_radius, index_rate, rms_mix_rate, protect, hop_length, f0_method, input_path, output_path, pth_path, index_path, f0_autotune, clean_audio, clean_strength, export_format, embedder_model, resample_sr, split_audio, f0_autotune_strength, checkpointing, f0_onnx, embedders_mode, formant_shifting, formant_qfrency, formant_timbre, f0_file, proposal_pitch, proposal_pitch_threshold, audio_processing=False, alpha=0.5):    
+    # Xử lý None values để tránh lỗi subprocess
+    index_path = index_path or ""
+    f0_file = f0_file or ""
+    
+    # Đảm bảo python và convert_path không None
+    if not python:
+        logger.error("Python executable không được tìm thấy!")
+        return
+    if not configs.get("convert_path"):
+        logger.error("convert_path không được cấu hình!")
+        return
+    
     subprocess.run([
         python, 
         configs["convert_path"], 
