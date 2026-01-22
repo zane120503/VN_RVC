@@ -2,12 +2,49 @@ import os
 import sys
 import shutil
 import gradio as gr
-from main.app.variables import translations, configs, index_path
+from main.app.variables import translations, configs
 from main.app.core.ui import gr_info, gr_warning, gr_error
 from main.app.core.separate import separate_music
 from main.app.core.training import preprocess, extract, create_index, training
 from main.app.core.inference import convert_audio
 from main.app.tabs.training.child.training import get_next_cos_name
+
+def _ensure_dir(path: str) -> None:
+    if path and not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+
+def _pick_latest_model_file(model_name: str) -> str | None:
+    weights_dir = configs.get("weights_path", os.path.join("assets", "weights"))
+    if not os.path.exists(weights_dir):
+        return None
+
+    candidates = [
+        f for f in os.listdir(weights_dir)
+        if f.startswith(model_name) and f.endswith(".pth")
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda f: os.path.getmtime(os.path.join(weights_dir, f)), reverse=True)
+    return candidates[0]
+
+def _pick_index_file(model_name: str) -> str:
+    logs_dir = os.path.join(configs.get("logs_path", os.path.join("assets", "logs")), model_name)
+    if not os.path.exists(logs_dir):
+        return ""
+
+    # Ưu tiên index kiểu "added_*.index"
+    idx = [f for f in os.listdir(logs_dir) if f.endswith(".index") and "added" in f]
+    if idx:
+        idx.sort(key=lambda f: os.path.getmtime(os.path.join(logs_dir, f)), reverse=True)
+        return os.path.join(logs_dir, idx[0])
+
+    # Fallback: lấy index mới nhất nếu không có "added"
+    all_idx = [f for f in os.listdir(logs_dir) if f.endswith(".index")]
+    if not all_idx:
+        return ""
+    all_idx.sort(key=lambda f: os.path.getmtime(os.path.join(logs_dir, f)), reverse=True)
+    return os.path.join(logs_dir, all_idx[0])
 
 def automation_workflow(
     training_files, 
@@ -35,7 +72,8 @@ def automation_workflow(
         yield None, log(f"== BẮT ĐẦU BƯỚC 1: TÁCH DATASET CHO MODEL {model_name} ==")
         
         # Tạo thư mục dataset tạm thời
-        dataset_dir = os.path.join("dataset", model_name)
+        dataset_root = "dataset"
+        dataset_dir = os.path.join(dataset_root, model_name)
         if os.path.exists(dataset_dir):
             shutil.rmtree(dataset_dir)
         os.makedirs(dataset_dir, exist_ok=True)
@@ -47,11 +85,12 @@ def automation_workflow(
         # Để đơn giản cho training, ta cần gom tất cả 'Vocals' vào 1 folder dataset model.
         
         # Tách từng file một và gom vocal
-        dataset_train_ready = os.path.join("dataset", model_name) # Đây là folder chứa wav 48k/32k sạch
+        dataset_train_ready = os.path.join(dataset_root, model_name) # Đây là folder chứa wav sạch
         # Nhưng separate_music output ra subfolder.
         # Ta sẽ tách vào temp_separate trước
         
-        temp_separate_dir = os.path.join("audios", f"temp_train_{model_name}")
+        audios_root = configs.get("audios_path", "audios")
+        temp_separate_dir = os.path.join(audios_root, f"temp_train_{model_name}")
         stub_dir = os.path.join(temp_separate_dir, "stub")
         os.makedirs(stub_dir, exist_ok=True)
         
@@ -109,12 +148,12 @@ def automation_workflow(
         
         target_path = target_song.name
         target_filename = os.path.splitext(os.path.basename(target_path))[0]
-        output_target_dir = os.path.join("audios", target_filename)
+        output_target_dir = os.path.join(audios_root, target_filename)
         
         yield None, log(f"Đang tách nhạc bài: {target_filename}...")
         
         # Tạo stub cho audios để workaround lỗi cắt path
-        audios_stub = os.path.join("audios", "stub")
+        audios_stub = os.path.join(audios_root, "stub")
         os.makedirs(audios_stub, exist_ok=True)
 
         separate_music(
@@ -230,39 +269,23 @@ def automation_workflow(
         # =================================================================================
         yield None, log(f"== BẮT ĐẦU BƯỚC 4: ĐỔI GIỌNG VÀ GHÉP NHẠC ==")
         
-        # Tìm file model .pth và .index
-        model_pth = f"{model_name}.pth" # Usually resides in assets/weights
-        
-        # Helper tìm model file nếu tên bị đổi (ví dụ thêm số steps)
-        weights_dir = os.path.join("assets", "weights")
-        if not os.path.exists(os.path.join(weights_dir, model_pth)):
-             chk_candidates = []
-             if os.path.exists(weights_dir):
-                 for f in os.listdir(weights_dir):
-                     if f.startswith(model_name) and f.endswith(".pth"):
-                         chk_candidates.append(f)
-             
-             if chk_candidates:
-                 # Sort by name length or mtime? 
-                 # Usually _latest suffix or _100e. sort by mtime is safer for "latest" run
-                 chk_candidates.sort(key=lambda x: os.path.getmtime(os.path.join(weights_dir, x)), reverse=True)
-                 model_pth = chk_candidates[0]
-                 yield None, log(f"Đã tìm thấy checkpoint model mới nhất: {model_pth}")
-             else:
-                 yield None, log(f"Cảnh báo: Không tìm thấy file model khớp tên {model_pth} trong {weights_dir}")
-        
-        # Tìm index file (Vừa tạo ở bước 2)
-        # logs/<model_name>/added_...index
-        index_file = ""
-        logs_model_dir = os.path.join("assets", "logs", model_name)
-        if os.path.exists(logs_model_dir):
-            for f in os.listdir(logs_model_dir):
-                if f.endswith(".index") and "added" in f:
-                    index_file = os.path.join(logs_model_dir, f)
-                    break
+        # Tìm model mới nhất trong weights (tên có thể là cos02_150e_1800s.pth)
+        model_pth = _pick_latest_model_file(model_name)
+        if not model_pth:
+            yield None, log(f"Lỗi: Không tìm thấy model .pth trong `{configs.get('weights_path', 'assets/weights')}` cho `{model_name}`.")
+            return
+        yield None, log(f"Đang dùng model: {model_pth}")
+
+        # Tìm index file mới nhất (ưu tiên added_*.index)
+        index_file = _pick_index_file(model_name)
+        if index_file:
+            yield None, log(f"Đang dùng index: {index_file}")
+        else:
+            yield None, log("Cảnh báo: Không tìm thấy file index, sẽ chạy không dùng index (chất lượng có thể kém hơn).")
         
         # Output path
-        final_output_path = os.path.join("audios", f"{target_filename}_COVER_{model_name}.mp3")
+        final_output_path = os.path.join(audios_root, f"{target_filename}_COVER_{model_name}.mp3")
+        _ensure_dir(os.path.dirname(final_output_path))
         
         yield None, log(f"Đang đổi giọng và ghép beat... (Model: {model_name})")
         
@@ -294,14 +317,27 @@ def automation_workflow(
             add_echo=True, echo_wet=0.25, echo_delay_ms=125
         )
         
-        # convert_audio returns list. mix output is usually at index 6 based on convert.py
-        # [vocal, backing, merge_back, original, merge_inst, update, mix_result]
+        if not result_paths or len(result_paths) < 7:
+            yield None, log("Lỗi: convert_audio không trả về kết quả hợp lệ (có thể do thiếu model/đầu vào/đầu ra).")
+            return
+
+        # convert_audio returns list: [vocal, backing, merge_back, original, merge_inst, update, mix_result]
         final_mix = result_paths[6]
         
         if final_mix and os.path.exists(final_mix):
              yield final_mix, log(f"== HOÀN TẤT! FILE KẾT QUẢ: {final_mix} ==")
         else:
-             yield None, log("Lỗi: Không tạo được file kết quả cuối cùng.")
+             # Log thêm thông tin để debug nhanh
+             weights_dir = configs.get("weights_path", "assets/weights")
+             logs_dir = configs.get("logs_path", "assets/logs")
+             yield None, log(
+                 "Lỗi: Không tạo được file kết quả cuối cùng.\n"
+                 f"- model_pth: {model_pth} (weights_dir={weights_dir})\n"
+                 f"- index: {index_file or '(none)'} (logs_dir={logs_dir})\n"
+                 f"- vocal_file: {vocal_file} (exists={os.path.exists(vocal_file)})\n"
+                 f"- instrument_file: {instrument_file} (exists={os.path.exists(instrument_file)})\n"
+                 f"- output: {final_output_path}"
+             )
 
     except Exception as e:
         import traceback
