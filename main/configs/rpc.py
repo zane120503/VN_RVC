@@ -42,13 +42,12 @@ def send_discord_rpc(pipe):
         )
     )
 
-    pipe.read(8)
-    pipe.read(
-        struct.unpack(
-            "<I", 
-            pipe.read(4)
-        )[0]
-    )
+    # Correctly read opcode and length
+    header = pipe.read(8)
+    if len(header) == 8:
+        opcode, length = struct.unpack("<II", header)
+        if length > 0:
+            pipe.read(length)
 
     pipe.write(
         create_payload(

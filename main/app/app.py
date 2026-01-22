@@ -17,6 +17,7 @@ from main.app.tabs.editing.editing import editing_tab
 from main.app.tabs.training.training import training_tab
 from main.app.tabs.downloads.downloads import download_tab
 from main.app.tabs.inference.inference import inference_tab
+from main.app.tabs.automation.automation import automation_tab
 from main.configs.rpc import connect_discord_ipc, send_discord_rpc
 from main.app.variables import logger, config, translations, theme, font, configs, language, allow_disk
 
@@ -447,7 +448,8 @@ with gr.Blocks(
     gr.HTML("<h1 style='text-align: center;'>🎵VIETNAMESE RVC🎵</h1>")
     gr.HTML(f"<h3 style='text-align: center;'>{translations['title']}</h3>")
 
-    with gr.Tabs():      
+    with gr.Tabs():   
+        automation_tab()   
         inference_tab()
         editing_tab()
 

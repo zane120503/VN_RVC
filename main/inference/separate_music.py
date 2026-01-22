@@ -363,6 +363,9 @@ def vr_main(
         for audio in output_list:
             audio_path = os.path.join(output_dirs, audio)
 
+            if "_(Instrumental)_" in audio and os.environ.get("SKIP_INST_DENOISE") == "1":
+                 continue
+
             denoise_file = separate_main(
                 audio_file=audio_path, 
                 model_filename=denoise_models.get(denoise_model, denoise_model), 

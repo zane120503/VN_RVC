@@ -10,6 +10,66 @@ from main.app.core.inference import convert_audio, convert_selection
 from main.app.variables import translations, paths_for_files, sample_rate_choice, model_name, index_path, method_f0, f0_file, embedders_mode, embedders_model, presets_file, configs, file_types, export_format_choices, hybrid_f0_method
 from main.app.core.ui import visible, valueFalse_interactive, change_audios_choices, change_f0_choices, unlock_f0, change_preset_choices, change_backing_choices, hoplength_show, change_models_choices, get_index, index_strength_show, change_embedders_mode, shutil_move
 
+def get_latest_separation_folder():
+    audios_path = configs.get("audios_path", "audios")
+    if not os.path.exists(audios_path): return None
+    subdirs = [os.path.join(audios_path, d) for d in os.listdir(audios_path) if os.path.isdir(os.path.join(audios_path, d))]
+    if not subdirs: return None
+    try:
+        return max(subdirs, key=os.path.getmtime)
+    except ValueError:
+        return None
+
+def get_latest_vocal():
+    folder = get_latest_separation_folder()
+    if not folder: return ""
+    # Prioritize files with "Vocals" in name
+    candidates = []
+    for f in os.listdir(folder):
+        if "Vocals" in f and os.path.isfile(os.path.join(folder, f)):
+             candidates.append(os.path.join(folder, f))
+    if candidates:
+        return max(candidates, key=os.path.getmtime)
+    return ""
+
+def get_latest_instrument():
+    folder = get_latest_separation_folder()
+    if not folder: return None
+    # Look for Instruments
+    candidates = []
+    for f in os.listdir(folder):
+        if "Instruments" in f and os.path.isfile(os.path.join(folder, f)):
+             candidates.append(os.path.join(folder, f))
+    if candidates:
+        return max(candidates, key=os.path.getmtime)
+    return None
+
+def get_latest_model_file():
+    weights_path = "assets/weights"
+    if not os.path.exists(weights_path): return ""
+    files = [os.path.join(weights_path, f) for f in os.listdir(weights_path) if f.endswith(".pth")]
+    if not files: return ""
+    try:
+        return os.path.basename(max(files, key=os.path.getmtime))
+    except ValueError:
+        return ""
+
+def get_latest_index_file():
+    # Recursive search for latest .index file in assets/logs
+    logs_path = "assets/logs"
+    if not os.path.exists(logs_path): return ""
+    index_files = []
+    for root, dirs, files in os.walk(logs_path):
+        for file in files:
+            if file.endswith(".index"):
+                index_files.append(os.path.join(root, file))
+    
+    if not index_files: return ""
+    try:
+        return max(index_files, key=os.path.getmtime)
+    except ValueError:
+        return ""
+
 def convert_tab():
     with gr.Row():
         gr.Markdown(translations["convert_info"])
@@ -17,7 +77,7 @@ def convert_tab():
         with gr.Column():
             with gr.Group():
                 with gr.Row():
-                    cleaner0 = gr.Checkbox(label=translations["clear_audio"], value=False, interactive=True)
+                    cleaner0 = gr.Checkbox(label=translations["clear_audio"], value=True, interactive=True)
                     autotune = gr.Checkbox(label=translations["autotune"], value=False, interactive=True)
                     use_audio = gr.Checkbox(label=translations["use_audio"], value=False, interactive=True)
                     checkpointing = gr.Checkbox(label=translations["memory_efficient_training"], value=False, interactive=True)
@@ -43,23 +103,23 @@ def convert_tab():
         with gr.Column():
             with gr.Accordion(translations["model_accordion"], open=True):
                 with gr.Row():
-                    model_pth = gr.Dropdown(label=translations["model_name"], choices=model_name, value=model_name[0] if len(model_name) >= 1 else "", interactive=True, allow_custom_value=True)
-                    model_index = gr.Dropdown(label=translations["index_path"], choices=index_path, value=index_path[0] if len(index_path) >= 1 else "", interactive=True, allow_custom_value=True)
+                    model_pth = gr.Dropdown(label=translations["model_name"], choices=model_name, value=get_latest_model_file() if get_latest_model_file() in model_name else (model_name[0] if len(model_name) >= 1 else ""), interactive=True, allow_custom_value=True)
+                    model_index = gr.Dropdown(label=translations["index_path"], choices=index_path, value=get_latest_index_file() if get_latest_index_file() in index_path else (index_path[0] if len(index_path) >= 1 else ""), interactive=True, allow_custom_value=True)
                 with gr.Row():
                     refresh = gr.Button(translations["refresh"])
                 with gr.Row():
                     index_strength = gr.Slider(label=translations["index_strength"], info=translations["index_strength_info"], minimum=0, maximum=1, value=0.5, step=0.01, interactive=True, visible=model_index.value != "")
             with gr.Accordion(translations["input_output"], open=False):
                 with gr.Column():
-                    export_format = gr.Radio(label=translations["export_format"], info=translations["export_info"], choices=export_format_choices, value="wav", interactive=True)
-                    input_audio0 = gr.Dropdown(label=translations["audio_path"], value="", choices=paths_for_files, info=translations["provide_audio"], allow_custom_value=True, interactive=True)
-                    output_audio = gr.Textbox(label=translations["output_path"], value="audios/output.wav", placeholder="audios/output.wav", info=translations["output_path_info"], interactive=True)
-                    mix_beat = gr.Checkbox(label="Ghép với beat (input beat riêng)", value=False, interactive=True, visible=not use_audio.value)
-                    beat_file = gr.File(label="File beat", file_types=[".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".alac", ".wma"], visible=False)
-                    mix_auto_gain = gr.Checkbox(label="Tự cân bằng âm lượng (vocal theo beat)", value=True, interactive=True, visible=False)
-                    add_echo = gr.Checkbox(label=translations["add_echo_before_mix"], value=False, interactive=True, visible=False)
-                    echo_wet = gr.Slider(label=translations["echo_wet"], info=translations["echo_wet_info"], minimum=0, maximum=1, step=0.05, value=0.25, interactive=True, visible=False)
-                    echo_delay = gr.Slider(label=translations["echo_delay_ms"], info=translations["echo_delay_ms_info"], minimum=50, maximum=1500, step=25, value=300, interactive=True, visible=False)
+                    export_format = gr.Radio(label=translations["export_format"], info=translations["export_info"], choices=export_format_choices, value="mp3", interactive=True)
+                    input_audio0 = gr.Dropdown(label=translations["audio_path"], value=get_latest_vocal(), choices=paths_for_files, info=translations["provide_audio"], allow_custom_value=True, interactive=True)
+                    output_audio = gr.Textbox(label=translations["output_path"], value="audios/output.mp3", placeholder="audios/output.mp3", info=translations["output_path_info"], interactive=True)
+                    mix_beat = gr.Checkbox(label="Ghép với beat (input beat riêng)", value=True, interactive=True, visible=not use_audio.value)
+                    beat_file = gr.File(label="File beat", value=get_latest_instrument(), file_types=[".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".alac", ".wma"], visible=True)
+                    mix_auto_gain = gr.Checkbox(label="Tự cân bằng âm lượng (vocal theo beat)", value=True, interactive=True, visible=True)
+                    add_echo = gr.Checkbox(label=translations["add_echo_before_mix"], value=True, interactive=True, visible=True)
+                    echo_wet = gr.Slider(label=translations["echo_wet"], info=translations["echo_wet_info"], minimum=0, maximum=1, step=0.05, value=0.25, interactive=True, visible=True)
+                    echo_delay = gr.Slider(label=translations["echo_delay_ms"], info=translations["echo_delay_ms_info"], minimum=50, maximum=1500, step=25, value=125, interactive=True, visible=True)
                 with gr.Column():
                     refresh0 = gr.Button(translations["refresh"])
             with gr.Accordion(translations["setting"], open=False):
@@ -134,7 +194,7 @@ def convert_tab():
         original_convert = gr.Audio(show_download_button=True, interactive=False, label=translations["convert_original"], visible=use_original.value)
         vocal_instrument = gr.Audio(show_download_button=True, interactive=False, label=translations["voice_or_instruments"], visible=merge_instrument.value)  
     with gr.Row():
-        mix_output = gr.Audio(show_download_button=True, interactive=False, label="Giọng + Beat", visible=False)
+        mix_output = gr.Audio(show_download_button=True, interactive=False, label="Giọng + Beat", visible=True)
     with gr.Row():
         upload_f0_file.upload(fn=lambda inp: shutil_move(inp.name, configs["f0_path"]), inputs=[upload_f0_file], outputs=[f0_file_dropdown])
         refresh_f0_file.click(fn=change_f0_choices, inputs=[], outputs=[f0_file_dropdown])

@@ -7,8 +7,32 @@ sys.path.append(os.getcwd())
 
 from main.app.core.process import zip_file
 from main.app.core.training import preprocess, extract, create_index, training
-from main.app.variables import translations, model_name, index_path, method_f0, embedders_mode, embedders_model, pretrainedD, pretrainedG, config, file_types, hybrid_f0_method, reference_list
+from main.app.variables import translations, model_name, index_path, method_f0, embedders_mode, embedders_model, pretrainedD, pretrainedG, config, file_types, hybrid_f0_method, reference_list, configs
 from main.app.core.ui import gr_warning, visible, unlock_f0, hoplength_show, change_models_choices, get_gpu_info, change_embedders_mode, pitch_guidance_lock, vocoders_lock, unlock_ver, unlock_vocoder, change_pretrained_choices, gpu_number_str, shutil_move, change_reference_choices
+
+def get_next_cos_name():
+    import re
+    # Determine the directory where models/logs are stored. 
+    # Usually this is assets/logs or based on configs["logs_path"]
+    logs_path = configs.get("logs_path", "assets/logs")
+    if not os.path.exists(logs_path):
+        return "cos01"
+    
+    max_num = 0
+    pattern = re.compile(r"^cos(\d+)$")
+    
+    for name in os.listdir(logs_path):
+        if os.path.isdir(os.path.join(logs_path, name)):
+            match = pattern.match(name)
+            if match:
+                try:
+                    num = int(match.group(1))
+                    if num > max_num:
+                        max_num = num
+                except ValueError:
+                    continue
+    
+    return f"cos{max_num + 1:02d}"
 
 def training_model_tab():
     with gr.Row():
@@ -17,7 +41,7 @@ def training_model_tab():
         with gr.Column():
             with gr.Row():
                 with gr.Column():
-                    training_name = gr.Textbox(label=translations["modelname"], info=translations["training_model_name"], value="", placeholder=translations["modelname"], interactive=True)
+                    training_name = gr.Textbox(label=translations["modelname"], info=translations["training_model_name"], value=get_next_cos_name(), placeholder=translations["modelname"], interactive=True)
                     training_sr = gr.Radio(label=translations["sample_rate"], info=translations["sample_rate_info"], choices=["32k", "40k", "48k"], value="48k", interactive=True) 
                     training_ver = gr.Radio(label=translations["training_version"], info=translations["training_version_info"], choices=["v1", "v2"], value="v2", interactive=True) 
                     with gr.Row():
@@ -26,7 +50,7 @@ def training_model_tab():
                         training_f0 = gr.Checkbox(label=translations["training_pitch"], value=True, interactive=True)
                         custom_reference = gr.Checkbox(label=translations["custom_reference"], value=False, interactive=True)
                         checkpointing1 = gr.Checkbox(label=translations["memory_efficient_training"], value=False, interactive=True)
-                        upload = gr.Checkbox(label=translations["upload_dataset"], value=False, interactive=True)
+                        upload = gr.Checkbox(label=translations["upload_dataset"], value=True, interactive=True)
                     with gr.Row():
                         preprocess_split_audio_mode = gr.Radio(label=translations["split_audio_mode"], info=translations["split_audio_mode_info"], value="Automatic", choices=["Automatic", "Simple", "Skip"], interactive=True)
                         preprocess_normalization_mode = gr.Radio(label=translations["normalization_mode"], info=translations["normalization_mode_info"], value="none", choices=["none", "pre", "post"], interactive=True)
@@ -66,7 +90,7 @@ def training_model_tab():
         with gr.Column():
             with gr.Row():
                 with gr.Column():
-                    total_epochs = gr.Slider(label=translations["total_epoch"], info=translations["total_epoch_info"], minimum=1, maximum=10000, value=300, step=1, interactive=True)
+                    total_epochs = gr.Slider(label=translations["total_epoch"], info=translations["total_epoch_info"], minimum=1, maximum=10000, value=150, step=1, interactive=True)
                     save_epochs = gr.Slider(label=translations["save_epoch"], info=translations["save_epoch_info"], minimum=1, maximum=10000, value=50, step=1, interactive=True)
                 with gr.Column():
                     index_button = gr.Button(f"3. {translations['create_index']}", variant="primary", scale=2)
