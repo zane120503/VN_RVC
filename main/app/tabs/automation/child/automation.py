@@ -233,6 +233,24 @@ def automation_workflow(
         # Tìm file model .pth và .index
         model_pth = f"{model_name}.pth" # Usually resides in assets/weights
         
+        # Helper tìm model file nếu tên bị đổi (ví dụ thêm số steps)
+        weights_dir = os.path.join("assets", "weights")
+        if not os.path.exists(os.path.join(weights_dir, model_pth)):
+             chk_candidates = []
+             if os.path.exists(weights_dir):
+                 for f in os.listdir(weights_dir):
+                     if f.startswith(model_name) and f.endswith(".pth"):
+                         chk_candidates.append(f)
+             
+             if chk_candidates:
+                 # Sort by name length or mtime? 
+                 # Usually _latest suffix or _100e. sort by mtime is safer for "latest" run
+                 chk_candidates.sort(key=lambda x: os.path.getmtime(os.path.join(weights_dir, x)), reverse=True)
+                 model_pth = chk_candidates[0]
+                 yield None, log(f"Đã tìm thấy checkpoint model mới nhất: {model_pth}")
+             else:
+                 yield None, log(f"Cảnh báo: Không tìm thấy file model khớp tên {model_pth} trong {weights_dir}")
+        
         # Tìm index file (Vừa tạo ở bước 2)
         # logs/<model_name>/added_...index
         index_file = ""
