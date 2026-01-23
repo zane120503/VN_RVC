@@ -190,6 +190,24 @@ def training(model_name, rvc_version, save_every_epoch, save_only_latest, save_e
                 )
             )
 
+            # --- Check corrupt/incomplete pretrained files ---
+            # f0G48k.pth ~ 72MB, f0D48k.pth ~ 136MB
+            # Nếu nhỏ hơn ngưỡng (ví dụ 90% size chuẩn), xóa đi để tải lại
+            if os.path.exists(pretrained_G):
+                g_size = os.path.getsize(pretrained_G)
+                if "48k" in pg2 and g_size < 70 * 1024 * 1024:
+                    print(f"Phát hiện file G lỗi/chưa đủ ({g_size} bytes), xoá để tải lại...")
+                    try: os.remove(pretrained_G)
+                    except: pass
+            
+            if os.path.exists(pretrained_D):
+                d_size = os.path.getsize(pretrained_D)
+                if "48k" in pd2 and d_size < 130 * 1024 * 1024:
+                    print(f"Phát hiện file D lỗi/chưa đủ ({d_size} bytes), xoá để tải lại...")
+                    try: os.remove(pretrained_D)
+                    except: pass
+            # -------------------------------------------------
+
             try:
                 if not os.path.exists(pretrained_G):
                     gr_info(translations["download_pretrained"].format(dg="G", rvc_version=rvc_version))

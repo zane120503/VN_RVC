@@ -20,12 +20,9 @@ def HF_download_file(url, output_path=None, max_retries=3, retry_delay=5):
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    # Kiểm tra file đã tồn tại chưa
-    if os.path.exists(output_path):
-        file_size = os.path.getsize(output_path)
-        if file_size > 0:
-            print(f"File đã tồn tại: {output_path} ({file_size / (1024*1024):.2f} MB)")
-            return output_path
+    # Kiểm tra file đã tồn tại chưa (logic cũ bị bỏ để allow resume)
+    # Block cũ: return ngay nếu file > 0. Giờ sẽ để xuống dưới check header Range
+    pass
 
     # Thử tải bằng requests (có retry và progress bar tốt hơn)
     for attempt in range(max_retries):
@@ -42,6 +39,11 @@ def HF_download_file(url, output_path=None, max_retries=3, retry_delay=5):
             # Tăng timeout và giảm chunk size để ổn định hơn
             response = requests.get(url, stream=True, timeout=600, headers=resume_header)
             
+            # Handle 416 Range Not Satisfiable (nghĩa là file đã tải xong rồi)
+            if response.status_code == 416:
+                print(f"File đã tải đầy đủ (Server trả về 416): {output_path}")
+                return output_path
+
             if response.status_code == 200 or response.status_code == 206:  # 206 = Partial Content
                 total_size = int(response.headers.get("content-length", 0))
                 if existing_size > 0 and response.status_code == 206:
