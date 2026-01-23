@@ -90,6 +90,11 @@ def automation_workflow(
         return "\n".join(logs)
 
     try:
+        # Define paths globally for the workflow
+        audios_root = configs.get("audios_path", "audios")
+        dataset_root = "dataset"
+        dataset_train_ready = os.path.join(dataset_root, model_name)
+
         # Check if model exists for Reuse Logic
         latest_model = _pick_latest_model_file(model_name)
         skip_training = False
@@ -108,7 +113,6 @@ def automation_workflow(
             yield None, log(f"== BẮT ĐẦU BƯỚC 1: TÁCH DATASET CHO MODEL {model_name} ==")
         
             # Tạo thư mục dataset tạm thời
-            dataset_root = "dataset"
             dataset_dir = os.path.join(dataset_root, model_name)
             if os.path.exists(dataset_dir):
                 shutil.rmtree(dataset_dir)
@@ -121,11 +125,8 @@ def automation_workflow(
             # Để đơn giản cho training, ta cần gom tất cả 'Vocals' vào 1 folder dataset model.
             
             # Tách từng file một và gom vocal
-            dataset_train_ready = os.path.join(dataset_root, model_name) # Đây là folder chứa wav sạch
-            # Nhưng separate_music output ra subfolder.
-            # Ta sẽ tách vào temp_separate trước
+            # model_name used in path defined above
             
-            audios_root = configs.get("audios_path", "audios")
             temp_separate_dir = os.path.join(audios_root, f"temp_train_{model_name}")
             stub_dir = os.path.join(temp_separate_dir, "stub")
             os.makedirs(stub_dir, exist_ok=True)
