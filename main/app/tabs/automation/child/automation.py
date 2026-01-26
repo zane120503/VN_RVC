@@ -132,7 +132,13 @@ def automation_workflow(
             os.makedirs(stub_dir, exist_ok=True)
             
             # Gọi tách nhạc
-            file_paths = [f.name for f in training_files]
+            # Support both Gradio file objs and string paths
+            file_paths = []
+            for f in training_files:
+                if isinstance(f, str):
+                    file_paths.append(f)
+                elif hasattr(f, 'name'):
+                    file_paths.append(f.name)
             
             yield None, log(f"Đang tách {len(file_paths)} file giọng train...")
             
@@ -199,7 +205,7 @@ def automation_workflow(
         # =================================================================================
         yield None, log(f"== BẮT ĐẦU BƯỚC 2: XỬ LÝ BÀI HÁT ĐÍCH ==")
         
-        target_path = target_song.name
+        target_path = target_song if isinstance(target_song, str) else target_song.name
         target_filename = os.path.splitext(os.path.basename(target_path))[0]
         output_target_dir = os.path.join(audios_root, target_filename)
         
@@ -430,5 +436,6 @@ def automation_tab():
     btn_run.click(
         fn=automation_workflow,
         inputs=[training_files, target_song, model_name, epochs, pitch_shift, force_retrain],
-        outputs=[output_audio, logs]
+        outputs=[output_audio, logs],
+        api_name="run_automation"
     )
