@@ -29,6 +29,8 @@ class AutomationRequest(BaseModel):
 
 # In-memory storage for tasks
 # Structure: { task_id: { "status": str, "message": str, "result_path": str, "logs": str } }
+TASKS: Dict[str, Dict[str, Any]] = {}
+
 import queue
 
 # Global Queue for sequential processing
