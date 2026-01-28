@@ -122,6 +122,30 @@ def get_task_status(task_id: str):
         **TASKS[task_id]
     }
 
+from fastapi.responses import FileResponse
+
+@app.get("/download/{task_id}")
+def download_result(task_id: str):
+    """Downloads the final result file if the task is completed."""
+    if task_id not in TASKS:
+        raise HTTPException(status_code=404, detail="Task ID not found")
+    
+    task = TASKS[task_id]
+    
+    if task["status"] != "completed":
+        raise HTTPException(status_code=400, detail=f"Task is not completed. Current status: {task['status']}")
+        
+    result_path = task.get("result_path")
+    
+    if not result_path or not os.path.exists(result_path):
+        raise HTTPException(status_code=404, detail="Result file not found on server.")
+        
+    return FileResponse(
+        path=result_path, 
+        filename=os.path.basename(result_path),
+        media_type="audio/mpeg"
+    )
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "mode": "headless-async", "active_tasks": len(TASKS)}
