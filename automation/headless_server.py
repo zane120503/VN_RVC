@@ -29,17 +29,39 @@ class AutomationRequest(BaseModel):
 
 # In-memory storage for tasks
 # Structure: { task_id: { "status": str, "message": str, "result_path": str, "logs": str } }
-TASKS: Dict[str, Dict[str, Any]] = {}
+import queue
 
-def run_automation_thread(task_id: str, request: AutomationRequest):
-    """Background worker to run the heavy automation workflow."""
-    print(f"[Task {task_id}] Started processing for model {request.model_name}")
+# Global Queue for sequential processing
+TASK_QUEUE = queue.Queue()
+
+def worker_loop():
+    """Consumes tasks from the queue and processes them sequentially."""
+    print("Worker thread started, waiting for tasks...")
+    while True:
+        try:
+            # Block until a task is available
+            task_id, request = TASK_QUEUE.get()
+            print(f"[Worker] Picked up task {task_id}")
+            
+            run_automation_task(task_id, request)
+            
+            TASK_QUEUE.task_done()
+            print(f"[Worker] Finished task {task_id}, remaining in queue: {TASK_QUEUE.qsize()}")
+            
+        except Exception as e:
+            print(f"[Worker] Critical Error in worker loop: {e}")
+            import traceback
+            traceback.print_exc()
+
+def run_automation_task(task_id: str, request: AutomationRequest):
+    """Actual logic to run the automation (formerly run_automation_thread)."""
+    print(f"[Task {task_id}] Processing workflow for model {request.model_name}")
+    
+    # Update status to running (it was 'queued')
     TASKS[task_id]["status"] = "running"
     TASKS[task_id]["message"] = "Starting workflow..."
     
     try:
-        # Import inside thread to capture logs better if we redirect stdout suitable for this thread
-        # (For now we just run it)
         final_output = None
         logs_accumulated = []
 
@@ -54,12 +76,12 @@ def run_automation_thread(task_id: str, request: AutomationRequest):
 
         for output_path, log_msg in generator:
             # Update logs in real-time
-            TASKS[task_id]["logs"] = log_msg[-2000:] # Keep last 2000 chars to save memory
-            TASKS[task_id]["message"] = "Processing..." # You could parse log_msg for better status
+            TASKS[task_id]["logs"] = log_msg[-3000:] 
+            TASKS[task_id]["message"] = "Processing..."
             
             if output_path:
                 final_output = output_path
-                print(f"[Task {task_id}] Got partial/final output: {output_path}")
+                print(f"[Task {task_id}] Got output: {output_path}")
 
         if final_output and os.path.exists(final_output):
             TASKS[task_id]["status"] = "completed"
@@ -77,10 +99,16 @@ def run_automation_thread(task_id: str, request: AutomationRequest):
         TASKS[task_id]["message"] = str(e)
         TASKS[task_id]["logs"] += f"\n\nERROR:\n{err_trace}"
 
+@app.on_event("startup")
+def startup_event():
+    """Start the worker thread on app startup."""
+    thread = threading.Thread(target=worker_loop, daemon=True)
+    thread.start()
+
 @app.post("/run")
 def run_automation(request: AutomationRequest):
-    """Starts the automation workflow in the background and returns a task_id."""
-    print(f"Received headless request: {request}")
+    """Enqueues an automation task."""
+    print(f"Received request: {request}")
     
     # Basic Validation
     for f in request.training_files:
@@ -94,21 +122,24 @@ def run_automation(request: AutomationRequest):
     
     # Initialize Task State
     TASKS[task_id] = {
-        "status": "started",
-        "message": "Initializing...",
+        "status": "queued", # New initial status
+        "message": "Waiting in queue...",
         "result_path": None,
-        "logs": ""
+        "logs": "",
+        "created_at": time.time()
     }
     
-    # Start Background Thread
-    thread = threading.Thread(target=run_automation_thread, args=(task_id, request))
-    thread.daemon = True # Daemon threads exit when the main program exits
-    thread.start()
+    # Add to Queue
+    TASK_QUEUE.put((task_id, request))
+    
+    q_size = TASK_QUEUE.qsize()
+    print(f"Task {task_id} queued. Queue size: {q_size}")
     
     return {
-        "status": "started",
+        "status": "queued",
         "task_id": task_id,
-        "message": "Automation started in background. Check status at /status/{task_id}"
+        "message": f"Task queued. Position in line: {q_size}",
+        "queue_size": q_size
     }
 
 @app.get("/status/{task_id}")
