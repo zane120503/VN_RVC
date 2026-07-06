@@ -30,6 +30,12 @@ RUN pip install uv six packaging python-dateutil platformdirs onnxconverter_comm
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# Thư viện hệ thống cho audio (sounddevice cần libportaudio, soundfile cần libsndfile)
+# Đặt sau lớp pip để không phá cache của các layer cài đặt nặng phía trên.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libportaudio2 libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- Source code ---
 COPY . .
 
