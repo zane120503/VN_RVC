@@ -1,0 +1,41 @@
+# Windows virtualenv — KHÔNG copy vào image (rất nặng & sai nền tảng)
+env/
+
+# VCS / editor
+.git/
+.cursor/
+.vscode/
+
+# Bytecode & cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# ffmpeg bản Windows (image đã cài ffmpeg qua apt)
+*.exe
+
+# Model / media lớn do người dùng tải về — cấp qua volume, không nhồi vào image
+*.pth
+*.pt
+*.onnx
+*.safetensors
+*.index
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.zip
+
+# .bin / .wav bị loại chung, NHƯNG giữ lại các file lõi thiết yếu của app
+*.bin
+*.wav
+!assets/binary/*.bin
+!assets/logs/mute/
+
+# Dữ liệu người dùng (mount volume)
+audios/
+dataset/
+temp_verify/
+ass/
+*.log

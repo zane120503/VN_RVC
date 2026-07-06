@@ -1,0 +1,33 @@
+services:
+  rvc-api:
+    build: .
+    image: vietnamese-rvc-api:latest
+    container_name: vietnamese-rvc-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Giữ model, âm thanh, dataset ở host để không mất khi rebuild container
+      - ./assets:/app/assets
+      - ./audios:/app/audios
+      - ./dataset:/app/dataset
+      - ./main/configs:/app/main/configs
+    environment:
+      # Chỉ dùng GPU 0 = RTX 5070 Ti (GPU 1 = 5060 Ti đang chạy ollama)
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    # Cấp GPU cho container (cần nvidia-container-toolkit trên host)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]   # ghim đúng RTX 5070 Ti
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
