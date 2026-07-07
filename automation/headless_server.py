@@ -114,11 +114,45 @@ def run_automation_task(task_id: str, request: AutomationRequest):
             except Exception as ce:
                 print(f"[Task {task_id}] Không dọn được {upload_dir}: {ce}")
 
+# =====================================================================================
+# JANITOR: tự động xóa file cũ trong audios/ để không đầy đĩa
+# =====================================================================================
+AUDIOS_ROOT = os.environ.get("AUDIOS_ROOT", "audios")   # khớp thư mục output của workflow
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "10"))   # xóa file cũ hơn N ngày
+JANITOR_INTERVAL_SEC = int(os.environ.get("JANITOR_INTERVAL_SEC", str(6 * 3600)))  # quét mỗi 6h
+
+def cleanup_old_files():
+    """Xóa file/thư mục trong audios/ có thời gian sửa đổi cũ hơn RETENTION_DAYS."""
+    if RETENTION_DAYS <= 0 or not os.path.isdir(AUDIOS_ROOT):
+        return
+    cutoff = time.time() - RETENTION_DAYS * 86400
+    for entry in os.listdir(AUDIOS_ROOT):
+        path = os.path.join(AUDIOS_ROOT, entry)
+        try:
+            if os.path.getmtime(path) >= cutoff:
+                continue
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            print(f"[Janitor] Đã xóa (cũ hơn {RETENTION_DAYS} ngày): {path}")
+        except Exception as e:
+            print(f"[Janitor] Lỗi khi xóa {path}: {e}")
+
+def janitor_loop():
+    print(f"Janitor thread started (xóa file audios/ cũ hơn {RETENTION_DAYS} ngày, quét mỗi {JANITOR_INTERVAL_SEC//3600}h).")
+    while True:
+        try:
+            cleanup_old_files()
+        except Exception as e:
+            print(f"[Janitor] Lỗi vòng lặp: {e}")
+        time.sleep(JANITOR_INTERVAL_SEC)
+
 @app.on_event("startup")
 def startup_event():
-    """Start the worker thread on app startup."""
-    thread = threading.Thread(target=worker_loop, daemon=True)
-    thread.start()
+    """Start the worker + janitor threads on app startup."""
+    threading.Thread(target=worker_loop, daemon=True).start()
+    threading.Thread(target=janitor_loop, daemon=True).start()
 
 @app.post("/run")
 def run_automation(request: AutomationRequest):
