@@ -3,6 +3,8 @@ services:
     build: .
     image: vietnamese-rvc-api:latest
     container_name: vietnamese-rvc-api
+    # Tăng /dev/shm (mặc định Docker chỉ 64MB) — DataLoader nhiều tiến trình khi train cần nhiều
+    shm_size: "8gb"
     ports:
       - "8000:8000"
     volumes:
