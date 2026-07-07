@@ -36,6 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
+# FastAPI cần python-multipart để nhận file upload qua endpoint /run_upload
+RUN pip install python-multipart
+
 # --- Source code ---
 COPY . .
 

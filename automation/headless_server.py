@@ -1,7 +1,8 @@
 import os
 import sys
+import shutil
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List
 
@@ -178,6 +179,66 @@ def download_result(task_id: str):
         filename=os.path.basename(result_path),
         media_type="audio/mpeg"
     )
+
+# Nơi lưu file người dùng upload trực tiếp (nằm trong volume ./audios đã mount)
+UPLOAD_DIR = "/app/audios/uploads"
+
+@app.post("/run_upload")
+async def run_upload(
+    model_name: str = Form(...),
+    epochs: int = Form(20),
+    pitch_shift: int = Form(0),
+    force_retrain: bool = Form(False),
+    target_song: UploadFile = File(...),
+    training_files: List[UploadFile] = File(...),
+):
+    """Nhận file upload trực tiếp (multipart), lưu lại rồi đưa vào hàng đợi.
+
+    Không cần đặt file thủ công vào thư mục mount — gửi thẳng file qua form-data.
+    """
+    # Mỗi request lưu vào một thư mục con riêng để tránh trùng tên
+    session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
+    os.makedirs(session_dir, exist_ok=True)
+
+    def _save(upload: UploadFile) -> str:
+        if not upload.filename:
+            raise HTTPException(status_code=400, detail="Có file upload thiếu tên file.")
+        dest = os.path.join(session_dir, os.path.basename(upload.filename))
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(upload.file, out)
+        return dest
+
+    target_path = _save(target_song)
+    train_paths = [_save(f) for f in training_files]
+
+    request = AutomationRequest(
+        training_files=train_paths,
+        target_song_path=target_path,
+        model_name=model_name,
+        epochs=epochs,
+        pitch_shift=pitch_shift,
+        force_retrain=force_retrain,
+    )
+
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {
+        "status": "queued",
+        "message": "Waiting in queue...",
+        "result_path": None,
+        "logs": "",
+        "created_at": time.time()
+    }
+    TASK_QUEUE.put((task_id, request))
+    q_size = TASK_QUEUE.qsize()
+    print(f"[Upload] Task {task_id} queued from {session_dir}. Queue size: {q_size}")
+
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "message": f"Đã nhận {len(train_paths)} file huấn luyện + 1 bài hát. Vào hàng đợi (vị trí {q_size}).",
+        "queue_size": q_size,
+        "saved_dir": session_dir,
+    }
 
 @app.get("/health")
 def health_check():
