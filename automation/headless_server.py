@@ -102,6 +102,18 @@ def run_automation_task(task_id: str, request: AutomationRequest):
         TASKS[task_id]["message"] = str(e)
         TASKS[task_id]["logs"] += f"\n\nERROR:\n{err_trace}"
 
+    finally:
+        # Dọn file input đã upload để không đầy đĩa (chỉ áp dụng task từ /run_upload).
+        # File kết quả nằm ở audios/ nên xóa thư mục upload không ảnh hưởng.
+        # Tắt cơ chế này bằng biến môi trường CLEANUP_UPLOADS=0.
+        upload_dir = TASKS[task_id].get("upload_dir")
+        if upload_dir and os.environ.get("CLEANUP_UPLOADS", "1") != "0":
+            try:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                print(f"[Task {task_id}] Đã dọn thư mục upload: {upload_dir}")
+            except Exception as ce:
+                print(f"[Task {task_id}] Không dọn được {upload_dir}: {ce}")
+
 @app.on_event("startup")
 def startup_event():
     """Start the worker thread on app startup."""
@@ -226,7 +238,8 @@ async def run_upload(
         "message": "Waiting in queue...",
         "result_path": None,
         "logs": "",
-        "created_at": time.time()
+        "created_at": time.time(),
+        "upload_dir": session_dir  # để worker dọn sau khi xử lý xong
     }
     TASK_QUEUE.put((task_id, request))
     q_size = TASK_QUEUE.qsize()
