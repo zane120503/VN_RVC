@@ -1,7 +1,6 @@
 import os
 import sys
 import shutil
-import subprocess
 import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
@@ -253,10 +252,13 @@ UPLOAD_DIR = "/app/audios/uploads"
 
 # API lấy vị trí media của bài hát theo id (trả JSON có trường "video" = URL .mp4)
 STREAM_INFO_URL = os.environ.get("STREAM_INFO_URL", "http://172.16.10.12:3004/stream/stream_info")
+# Tên file audio (có giọng gốc) trong cùng thư mục bài hát. video.mp4 chỉ có video,
+# nên phải lấy audio.mp3 (bản đầy đủ có giọng để tách & thay).
+TARGET_AUDIO_FILENAME = os.environ.get("TARGET_AUDIO_FILENAME", "audio.mp3")
 
 def fetch_target_by_id(song_id: str, dest_dir: str) -> str:
-    """Gọi stream_info theo id -> tải media -> tách audio .wav để đưa vào pipeline."""
-    # 1) Hỏi vị trí media
+    """Gọi stream_info theo id -> suy ra URL audio.mp3 -> tải về làm target."""
+    # 1) Hỏi vị trí media (trả về URL video.mp4)
     try:
         r = requests.get(STREAM_INFO_URL, params={"id": song_id, "sourceType": "LOCAL"}, timeout=15)
         r.raise_for_status()
@@ -264,38 +266,34 @@ def fetch_target_by_id(song_id: str, dest_dir: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Không gọi được stream_info cho id={song_id}: {e}")
 
-    media_url = info.get("video") or info.get("audio")
-    if not media_url:
-        raise HTTPException(status_code=404, detail=f"stream_info không có media cho id={song_id}: {info}")
+    video_url = info.get("video")
+    if not video_url:
+        raise HTTPException(status_code=404, detail=f"stream_info không có 'video' cho id={song_id}: {info}")
 
-    # 2) Tải file media về
-    raw_path = os.path.join(dest_dir, f"target_{song_id}_raw.mp4")
+    # 2) Suy ra URL audio: đổi tên file cuối (video.mp4 -> audio.mp3) trong cùng thư mục
+    audio_url = video_url.rsplit("/", 1)[0] + "/" + TARGET_AUDIO_FILENAME
+
+    # 3) Tải audio về (đã là mp3, đưa thẳng vào pipeline)
+    ext = os.path.splitext(TARGET_AUDIO_FILENAME)[1] or ".mp3"
+    dest = os.path.join(dest_dir, f"target_{song_id}{ext}")
     try:
-        with requests.get(media_url, stream=True, timeout=120) as resp:
+        with requests.get(audio_url, stream=True, timeout=120) as resp:
             resp.raise_for_status()
-            with open(raw_path, "wb") as f:
+            with open(dest, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 20):
                     if chunk:
                         f.write(chunk)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Không tải được media {media_url}: {e}")
+        raise HTTPException(status_code=502, detail=f"Không tải được audio {audio_url}: {e}")
 
-    if os.path.getsize(raw_path) < 10_000:
-        raise HTTPException(status_code=502, detail=f"File tải về quá nhỏ (URL lỗi?): {media_url}")
-
-    # 3) Tách audio sang wav bằng ffmpeg (mp4 -> wav 44.1kHz)
-    audio_path = os.path.join(dest_dir, f"target_{song_id}.wav")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", raw_path, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", audio_path],
-            check=True, capture_output=True,
+    if os.path.getsize(dest) < 10_000:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Audio tải về quá nhỏ — có thể bài chưa xuất bản (version v/0) hoặc URL sai: {audio_url}",
         )
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"ffmpeg tách audio lỗi: {e.stderr.decode('utf-8', 'ignore')[-500:]}")
 
-    os.remove(raw_path)  # bỏ file mp4, chỉ giữ wav
-    print(f"[TargetById] id={song_id} -> {media_url} -> {audio_path}")
-    return audio_path
+    print(f"[TargetById] id={song_id} -> {audio_url} -> {dest}")
+    return dest
 
 @app.post("/run_upload", dependencies=[Depends(verify_api_key)])
 async def run_upload(
