@@ -39,3 +39,6 @@ dataset/
 temp_verify/
 ass/
 *.log
+
+# Secrets
+.env

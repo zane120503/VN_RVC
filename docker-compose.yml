@@ -18,6 +18,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=0
       - CUDA_VISIBLE_DEVICES=0
       - PYTHONUNBUFFERED=1
+      # API key đọc từ file .env trên host (không commit). Trống = API mở.
+      - API_KEY=${API_KEY:-}
     # Cấp GPU cho container (cần nvidia-container-toolkit trên host)
     deploy:
       resources:

@@ -2,7 +2,8 @@ import os
 import sys
 import shutil
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List
 
@@ -19,6 +20,25 @@ import time
 from typing import Dict, Any
 
 app = FastAPI(title="RVC Headless Automation API")
+
+# =====================================================================================
+# BẢO MẬT: xác thực bằng API key qua header "X-API-Key"
+# Đặt key qua biến môi trường API_KEY. Nếu không đặt -> mở (cảnh báo, dùng cho dev).
+# Endpoint /health luôn mở để Docker healthcheck hoạt động.
+# =====================================================================================
+API_KEY = os.environ.get("API_KEY", "").strip()
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+if not API_KEY:
+    print("⚠️  CẢNH BÁO: Chưa đặt API_KEY -> API đang MỞ, ai cũng gọi được. "
+          "Đặt biến môi trường API_KEY để bật bảo mật.")
+
+def verify_api_key(key: str = Security(api_key_header)):
+    """Chặn request nếu API_KEY được cấu hình mà header X-API-Key sai/thiếu."""
+    if not API_KEY:
+        return  # không cấu hình key -> không bảo vệ
+    if not key or key != API_KEY:
+        raise HTTPException(status_code=401, detail="API key sai hoặc thiếu (header X-API-Key).")
 
 class AutomationRequest(BaseModel):
     training_files: List[str]
@@ -154,7 +174,7 @@ def startup_event():
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=janitor_loop, daemon=True).start()
 
-@app.post("/run")
+@app.post("/run", dependencies=[Depends(verify_api_key)])
 def run_automation(request: AutomationRequest):
     """Enqueues an automation task."""
     print(f"Received request: {request}")
@@ -191,7 +211,7 @@ def run_automation(request: AutomationRequest):
         "queue_size": q_size
     }
 
-@app.get("/status/{task_id}")
+@app.get("/status/{task_id}", dependencies=[Depends(verify_api_key)])
 def get_task_status(task_id: str):
     """Returns the current status and logs of a task."""
     if task_id not in TASKS:
@@ -204,7 +224,7 @@ def get_task_status(task_id: str):
 
 from fastapi.responses import FileResponse
 
-@app.get("/download/{task_id}")
+@app.get("/download/{task_id}", dependencies=[Depends(verify_api_key)])
 def download_result(task_id: str):
     """Downloads the final result file if the task is completed."""
     if task_id not in TASKS:
@@ -229,7 +249,7 @@ def download_result(task_id: str):
 # Nơi lưu file người dùng upload trực tiếp (nằm trong volume ./audios đã mount)
 UPLOAD_DIR = "/app/audios/uploads"
 
-@app.post("/run_upload")
+@app.post("/run_upload", dependencies=[Depends(verify_api_key)])
 async def run_upload(
     model_name: str = Form(...),
     epochs: int = Form(20),

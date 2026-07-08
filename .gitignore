@@ -40,3 +40,6 @@ assets/spreadsheet.csv
 
 # Local configs / runtime
 main/configs/config.json
+
+# Secrets
+.env
