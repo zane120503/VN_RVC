@@ -1,11 +1,13 @@
 import os
 import sys
 import shutil
+import subprocess
+import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 # Add root directory to path
 sys.path.append(os.getcwd())
@@ -249,18 +251,67 @@ def download_result(task_id: str):
 # Nơi lưu file người dùng upload trực tiếp (nằm trong volume ./audios đã mount)
 UPLOAD_DIR = "/app/audios/uploads"
 
+# API lấy vị trí media của bài hát theo id (trả JSON có trường "video" = URL .mp4)
+STREAM_INFO_URL = os.environ.get("STREAM_INFO_URL", "http://172.16.10.12:3004/stream/stream_info")
+
+def fetch_target_by_id(song_id: str, dest_dir: str) -> str:
+    """Gọi stream_info theo id -> tải media -> tách audio .wav để đưa vào pipeline."""
+    # 1) Hỏi vị trí media
+    try:
+        r = requests.get(STREAM_INFO_URL, params={"id": song_id, "sourceType": "LOCAL"}, timeout=15)
+        r.raise_for_status()
+        info = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Không gọi được stream_info cho id={song_id}: {e}")
+
+    media_url = info.get("video") or info.get("audio")
+    if not media_url:
+        raise HTTPException(status_code=404, detail=f"stream_info không có media cho id={song_id}: {info}")
+
+    # 2) Tải file media về
+    raw_path = os.path.join(dest_dir, f"target_{song_id}_raw.mp4")
+    try:
+        with requests.get(media_url, stream=True, timeout=120) as resp:
+            resp.raise_for_status()
+            with open(raw_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Không tải được media {media_url}: {e}")
+
+    if os.path.getsize(raw_path) < 10_000:
+        raise HTTPException(status_code=502, detail=f"File tải về quá nhỏ (URL lỗi?): {media_url}")
+
+    # 3) Tách audio sang wav bằng ffmpeg (mp4 -> wav 44.1kHz)
+    audio_path = os.path.join(dest_dir, f"target_{song_id}.wav")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_path, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", audio_path],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"ffmpeg tách audio lỗi: {e.stderr.decode('utf-8', 'ignore')[-500:]}")
+
+    os.remove(raw_path)  # bỏ file mp4, chỉ giữ wav
+    print(f"[TargetById] id={song_id} -> {media_url} -> {audio_path}")
+    return audio_path
+
 @app.post("/run_upload", dependencies=[Depends(verify_api_key)])
 async def run_upload(
     model_name: str = Form(...),
     epochs: int = Form(20),
     pitch_shift: int = Form(0),
     force_retrain: bool = Form(False),
-    target_song: UploadFile = File(...),
+    target_song_id: Optional[str] = Form(None),
+    target_song: Optional[UploadFile] = File(None),
     training_files: List[UploadFile] = File(...),
 ):
-    """Nhận file upload trực tiếp (multipart), lưu lại rồi đưa vào hàng đợi.
+    """Nhận file huấn luyện (upload) + bài hát đích, rồi đưa vào hàng đợi.
 
-    Không cần đặt file thủ công vào thư mục mount — gửi thẳng file qua form-data.
+    Bài hát đích có 2 cách cung cấp (chọn 1):
+      - target_song_id: id bài hát -> server tự lấy file qua stream_info API.
+      - target_song: upload file trực tiếp.
     """
     # Mỗi request lưu vào một thư mục con riêng để tránh trùng tên
     session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
@@ -274,7 +325,14 @@ async def run_upload(
             shutil.copyfileobj(upload.file, out)
         return dest
 
-    target_path = _save(target_song)
+    # Xác định bài hát đích: ưu tiên id, nếu không thì file upload
+    if target_song_id:
+        target_path = fetch_target_by_id(target_song_id, session_dir)
+    elif target_song is not None and target_song.filename:
+        target_path = _save(target_song)
+    else:
+        raise HTTPException(status_code=400, detail="Cần cung cấp target_song_id hoặc target_song (file).")
+
     train_paths = [_save(f) for f in training_files]
 
     request = AutomationRequest(
