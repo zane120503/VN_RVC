@@ -20,6 +20,12 @@ services:
       - PYTHONUNBUFFERED=1
       # API key đọc từ file .env trên host (không commit). Trống = API mở.
       - API_KEY=${API_KEY:-}
+      # DB Postgres để đăng ký model theo khách hàng (đọc từ .env; trống = chỉ dùng filesystem)
+      - DB_HOST=${DB_HOST:-}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-}
+      - DB_USER=${DB_USER:-}
+      - DB_PASSWORD=${DB_PASSWORD:-}
     # Cấp GPU cho container (cần nvidia-container-toolkit trên host)
     deploy:
       resources:

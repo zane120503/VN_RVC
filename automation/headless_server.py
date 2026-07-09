@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import shutil
 import requests
@@ -8,12 +9,23 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Optional
 
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
 # Add root directory to path
 sys.path.append(os.getcwd())
 
-# Import the workflow function directly
+# Import the workflow functions directly
 # This avoids loading the entire Gradio UI stack
-from main.app.tabs.automation.child.automation import automation_workflow
+from main.app.tabs.automation.child.automation import (
+    automation_workflow,
+    train_workflow,
+    convert_workflow,
+    _pick_latest_model_file,
+    _pick_index_file,
+)
 
 import threading
 import uuid
@@ -55,8 +67,89 @@ TASKS: Dict[str, Dict[str, Any]] = {}
 
 import queue
 
-# Global Queue for sequential processing
+# Global Queue for sequential processing.
+# Item: (task_id, kind, payload) — kind: "full" | "train" | "convert"
 TASK_QUEUE = queue.Queue()
+
+# =====================================================================================
+# DB ĐĂNG KÝ MODEL THEO KHÁCH HÀNG (Postgres, cấu hình qua .env)
+# =====================================================================================
+DB_HOST = os.environ.get("DB_HOST", "")
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))
+DB_NAME = os.environ.get("DB_NAME", "")
+DB_USER = os.environ.get("DB_USER", "")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+MODEL_TABLE = os.environ.get("MODEL_TABLE", "rvc_customer_models")
+
+def _db_enabled() -> bool:
+    return bool(DB_HOST and DB_NAME and psycopg2 is not None)
+
+def _db_conn():
+    return psycopg2.connect(
+        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+        user=DB_USER, password=DB_PASSWORD, connect_timeout=5,
+    )
+
+def init_model_table():
+    if not _db_enabled():
+        print("⚠️  DB chưa cấu hình (DB_HOST/DB_NAME) -> đăng ký model chỉ dựa trên filesystem.")
+        return
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {MODEL_TABLE} (
+                    customer_id VARCHAR PRIMARY KEY,
+                    model_name  VARCHAR NOT NULL,
+                    model_file  VARCHAR,
+                    index_file  VARCHAR,
+                    epochs      INTEGER,
+                    trained_at  TIMESTAMP DEFAULT NOW(),
+                    updated_at  TIMESTAMP DEFAULT NOW()
+                )""")
+        print(f"DB model registry sẵn sàng (bảng {MODEL_TABLE}).")
+    except Exception as e:
+        print(f"⚠️  Không khởi tạo được bảng model: {e}")
+
+def save_customer_model(customer_id, model_name, model_file, index_file, epochs):
+    """Upsert bản ghi model của khách hàng sau khi train xong."""
+    if not _db_enabled():
+        return
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {MODEL_TABLE} (customer_id, model_name, model_file, index_file, epochs, trained_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (customer_id) DO UPDATE SET
+                    model_name = EXCLUDED.model_name,
+                    model_file = EXCLUDED.model_file,
+                    index_file = EXCLUDED.index_file,
+                    epochs     = EXCLUDED.epochs,
+                    trained_at = NOW(),
+                    updated_at = NOW()
+                """, (customer_id, model_name, model_file, index_file, epochs))
+        print(f"[DB] Đã lưu model của khách {customer_id}: {model_file}")
+    except Exception as e:
+        print(f"[DB] Lỗi lưu model khách {customer_id}: {e}")
+
+def get_customer_model(customer_id):
+    if not _db_enabled():
+        return None
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT customer_id, model_name, model_file, index_file, epochs, trained_at, updated_at "
+                f"FROM {MODEL_TABLE} WHERE customer_id = %s", (customer_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "customer_id": row[0], "model_name": row[1], "model_file": row[2],
+                "index_file": row[3], "epochs": row[4],
+                "trained_at": str(row[5]), "updated_at": str(row[6]),
+            }
+    except Exception as e:
+        print(f"[DB] Lỗi đọc model khách {customer_id}: {e}")
+        return None
 
 def worker_loop():
     """Consumes tasks from the queue and processes them sequentially."""
@@ -64,45 +157,58 @@ def worker_loop():
     while True:
         try:
             # Block until a task is available
-            task_id, request = TASK_QUEUE.get()
-            print(f"[Worker] Picked up task {task_id}")
-            
-            run_automation_task(task_id, request)
-            
+            task_id, kind, payload = TASK_QUEUE.get()
+            print(f"[Worker] Picked up task {task_id} ({kind})")
+
+            run_automation_task(task_id, kind, payload)
+
             TASK_QUEUE.task_done()
             print(f"[Worker] Finished task {task_id}, remaining in queue: {TASK_QUEUE.qsize()}")
-            
+
         except Exception as e:
             print(f"[Worker] Critical Error in worker loop: {e}")
             import traceback
             traceback.print_exc()
 
-def run_automation_task(task_id: str, request: AutomationRequest):
-    """Actual logic to run the automation (formerly run_automation_thread)."""
-    print(f"[Task {task_id}] Processing workflow for model {request.model_name}")
-    
+def run_automation_task(task_id: str, kind: str, payload: dict):
+    """Chạy 1 task theo loại: full (train+convert), train (chỉ train), convert (chỉ đổi giọng)."""
+    print(f"[Task {task_id}] Processing '{kind}' workflow for model {payload.get('model_name')}")
+
     # Update status to running (it was 'queued')
     TASKS[task_id]["status"] = "running"
     TASKS[task_id]["message"] = "Starting workflow..."
-    
+
     try:
         final_output = None
-        logs_accumulated = []
 
-        generator = automation_workflow(
-            training_files=request.training_files,
-            target_song=request.target_song_path,
-            model_name=request.model_name,
-            epochs=request.epochs,
-            pitch_shift=request.pitch_shift,
-            force_retrain=request.force_retrain
-        )
+        if kind == "train":
+            generator = train_workflow(
+                training_files=payload["training_files"],
+                model_name=payload["model_name"],
+                epochs=payload["epochs"],
+                force_retrain=payload["force_retrain"],
+            )
+        elif kind == "convert":
+            generator = convert_workflow(
+                target_song=payload["target_song"],
+                model_name=payload["model_name"],
+                pitch_shift=payload["pitch_shift"],
+            )
+        else:  # "full" — quy trình cũ: train + convert trong 1 lần
+            generator = automation_workflow(
+                training_files=payload["training_files"],
+                target_song=payload["target_song"],
+                model_name=payload["model_name"],
+                epochs=payload["epochs"],
+                pitch_shift=payload["pitch_shift"],
+                force_retrain=payload["force_retrain"],
+            )
 
         for output_path, log_msg in generator:
             # Update logs in real-time
-            TASKS[task_id]["logs"] = log_msg[-3000:] 
+            TASKS[task_id]["logs"] = log_msg[-3000:]
             TASKS[task_id]["message"] = "Processing..."
-            
+
             if output_path:
                 final_output = output_path
                 print(f"[Task {task_id}] Got output: {output_path}")
@@ -111,6 +217,16 @@ def run_automation_task(task_id: str, request: AutomationRequest):
             TASKS[task_id]["status"] = "completed"
             TASKS[task_id]["result_path"] = final_output
             TASKS[task_id]["message"] = "Success"
+
+            # Train xong -> lưu đăng ký model theo khách hàng vào DB
+            if kind == "train" and payload.get("customer_id"):
+                save_customer_model(
+                    customer_id=payload["customer_id"],
+                    model_name=payload["model_name"],
+                    model_file=os.path.basename(final_output),
+                    index_file=os.path.basename(_pick_index_file(payload["model_name"]) or "") or None,
+                    epochs=payload.get("epochs"),
+                )
         else:
             TASKS[task_id]["status"] = "failed"
             TASKS[task_id]["message"] = "Workflow completed but no output file generated."
@@ -172,6 +288,7 @@ def janitor_loop():
 @app.on_event("startup")
 def startup_event():
     """Start the worker + janitor threads on app startup."""
+    init_model_table()
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=janitor_loop, daemon=True).start()
 
@@ -189,19 +306,27 @@ def run_automation(request: AutomationRequest):
 
     # Generate Task ID
     task_id = str(uuid.uuid4())
-    
+
     # Initialize Task State
     TASKS[task_id] = {
         "status": "queued", # New initial status
         "message": "Waiting in queue...",
         "result_path": None,
         "logs": "",
-        "created_at": time.time()
+        "created_at": time.time(),
+        "kind": "full"
     }
-    
+
     # Add to Queue
-    TASK_QUEUE.put((task_id, request))
-    
+    TASK_QUEUE.put((task_id, "full", {
+        "training_files": request.training_files,
+        "target_song": request.target_song_path,
+        "model_name": request.model_name,
+        "epochs": request.epochs,
+        "pitch_shift": request.pitch_shift,
+        "force_retrain": request.force_retrain,
+    }))
+
     q_size = TASK_QUEUE.qsize()
     print(f"Task {task_id} queued. Queue size: {q_size}")
     
@@ -333,15 +458,6 @@ async def run_upload(
 
     train_paths = [_save(f) for f in training_files]
 
-    request = AutomationRequest(
-        training_files=train_paths,
-        target_song_path=target_path,
-        model_name=model_name,
-        epochs=epochs,
-        pitch_shift=pitch_shift,
-        force_retrain=force_retrain,
-    )
-
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {
         "status": "queued",
@@ -349,9 +465,17 @@ async def run_upload(
         "result_path": None,
         "logs": "",
         "created_at": time.time(),
+        "kind": "full",
         "upload_dir": session_dir  # để worker dọn sau khi xử lý xong
     }
-    TASK_QUEUE.put((task_id, request))
+    TASK_QUEUE.put((task_id, "full", {
+        "training_files": train_paths,
+        "target_song": target_path,
+        "model_name": model_name,
+        "epochs": epochs,
+        "pitch_shift": pitch_shift,
+        "force_retrain": force_retrain,
+    }))
     q_size = TASK_QUEUE.qsize()
     print(f"[Upload] Task {task_id} queued from {session_dir}. Queue size: {q_size}")
 
@@ -361,6 +485,160 @@ async def run_upload(
         "message": f"Đã nhận {len(train_paths)} file huấn luyện + 1 bài hát. Vào hàng đợi (vị trí {q_size}).",
         "queue_size": q_size,
         "saved_dir": session_dir,
+    }
+
+# =====================================================================================
+# API TÁCH RIÊNG: /train (train model theo khách hàng) + /convert (đổi giọng bằng model đã có)
+# =====================================================================================
+
+def _model_name_for(customer_id: str) -> str:
+    """Sinh tên model từ id khách hàng (chỉ giữ chữ/số/gạch)."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(customer_id)).strip("_")
+    if not safe:
+        raise HTTPException(status_code=400, detail="customer_id không hợp lệ.")
+    return f"cus_{safe}"
+
+@app.post("/train", dependencies=[Depends(verify_api_key)])
+async def train_customer_model(
+    customer_id: str = Form(...),
+    epochs: int = Form(150),
+    force_retrain: bool = Form(False),
+    training_files: List[UploadFile] = File(...),
+):
+    """API 1: Train model giọng từ file ghi âm của khách hàng.
+
+    - Model được lưu theo customer_id (và ghi vào DB khi train xong).
+    - Nếu khách đã có model và force_retrain=false -> trả về luôn, không train lại.
+    - force_retrain=true -> xóa model cũ, train dữ liệu mới thay thế.
+    """
+    model_name = _model_name_for(customer_id)
+
+    existing = _pick_latest_model_file(model_name)
+    if existing and not force_retrain:
+        return {
+            "status": "exists",
+            "customer_id": customer_id,
+            "model_name": model_name,
+            "model_file": existing,
+            "message": "Khách hàng đã có model. Gửi force_retrain=true nếu muốn train dữ liệu mới thay thế.",
+        }
+
+    session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
+    os.makedirs(session_dir, exist_ok=True)
+
+    def _save(upload: UploadFile) -> str:
+        if not upload.filename:
+            raise HTTPException(status_code=400, detail="Có file upload thiếu tên file.")
+        dest = os.path.join(session_dir, os.path.basename(upload.filename))
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(upload.file, out)
+        return dest
+
+    train_paths = [_save(f) for f in training_files]
+
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {
+        "status": "queued",
+        "message": "Waiting in queue...",
+        "result_path": None,
+        "logs": "",
+        "created_at": time.time(),
+        "kind": "train",
+        "customer_id": customer_id,
+        "upload_dir": session_dir,
+    }
+    TASK_QUEUE.put((task_id, "train", {
+        "training_files": train_paths,
+        "model_name": model_name,
+        "epochs": epochs,
+        "force_retrain": force_retrain,
+        "customer_id": customer_id,
+    }))
+    q_size = TASK_QUEUE.qsize()
+    print(f"[Train] Task {task_id} queued for customer {customer_id}. Queue size: {q_size}")
+
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "customer_id": customer_id,
+        "model_name": model_name,
+        "message": f"Đã nhận {len(train_paths)} file ghi âm. Bắt đầu train model (vị trí hàng đợi: {q_size}).",
+        "queue_size": q_size,
+    }
+
+@app.get("/model/{customer_id}", dependencies=[Depends(verify_api_key)])
+def customer_model_info(customer_id: str):
+    """Kiểm tra khách hàng đã có model train sẵn chưa."""
+    model_name = _model_name_for(customer_id)
+    model_file = _pick_latest_model_file(model_name)
+    index_file = _pick_index_file(model_name)
+    return {
+        "customer_id": customer_id,
+        "trained": bool(model_file),
+        "model_name": model_name,
+        "model_file": model_file,
+        "index_file": os.path.basename(index_file) if index_file else None,
+        "db_record": get_customer_model(customer_id),
+    }
+
+@app.post("/convert", dependencies=[Depends(verify_api_key)])
+async def convert_with_customer_model(
+    customer_id: str = Form(...),
+    pitch_shift: int = Form(0),
+    target_song_id: Optional[str] = Form(None),
+    target_song: Optional[UploadFile] = File(None),
+):
+    """API 2: Đổi giọng bài hát bằng model đã train sẵn của khách hàng.
+
+    Bài hát đích: gửi target_song_id (lấy từ hệ thống) HOẶC upload file target_song.
+    """
+    model_name = _model_name_for(customer_id)
+
+    if not _pick_latest_model_file(model_name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Khách hàng {customer_id} chưa có model. Hãy gọi /train trước.",
+        )
+
+    session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
+    os.makedirs(session_dir, exist_ok=True)
+
+    if target_song_id:
+        target_path = fetch_target_by_id(target_song_id, session_dir)
+    elif target_song is not None and target_song.filename:
+        target_path = os.path.join(session_dir, os.path.basename(target_song.filename))
+        with open(target_path, "wb") as out:
+            shutil.copyfileobj(target_song.file, out)
+    else:
+        raise HTTPException(status_code=400, detail="Cần cung cấp target_song_id hoặc target_song (file).")
+
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {
+        "status": "queued",
+        "message": "Waiting in queue...",
+        "result_path": None,
+        "logs": "",
+        "created_at": time.time(),
+        "kind": "convert",
+        "customer_id": customer_id,
+        "upload_dir": session_dir,
+    }
+    TASK_QUEUE.put((task_id, "convert", {
+        "target_song": target_path,
+        "model_name": model_name,
+        "pitch_shift": pitch_shift,
+        "customer_id": customer_id,
+    }))
+    q_size = TASK_QUEUE.qsize()
+    print(f"[Convert] Task {task_id} queued for customer {customer_id}. Queue size: {q_size}")
+
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "customer_id": customer_id,
+        "model_name": model_name,
+        "message": f"Bắt đầu đổi giọng bằng model của khách (vị trí hàng đợi: {q_size}).",
+        "queue_size": q_size,
     }
 
 @app.get("/health")

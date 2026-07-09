@@ -36,8 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# FastAPI cần python-multipart để nhận file upload qua endpoint /run_upload
-RUN pip install python-multipart
+# FastAPI cần python-multipart để nhận file upload; psycopg2 để đăng ký model theo khách hàng vào Postgres
+RUN pip install python-multipart psycopg2-binary
 
 # --- Source code ---
 COPY . .
