@@ -14,6 +14,21 @@ def _ensure_dir(path: str) -> None:
     if path and not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
 
+def _free_gpu_memory():
+    """Trả VRAM mà tiến trình server đang giữ (cached allocator) về cho GPU.
+
+    Các bước tách nhạc/trích xuất giữ vài GB VRAM dạng cache sau khi chạy xong;
+    nếu không giải phóng, tiến trình train (chạy process riêng) sẽ bị CUDA OOM."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
 def _pick_latest_model_file(model_name: str) -> str | None:
     weights_dir = configs.get("weights_path", os.path.join("assets", "weights"))
     if not os.path.exists(weights_dir):
@@ -174,6 +189,7 @@ def automation_workflow(
             # Dọn dẹp temp
             shutil.rmtree(temp_separate_dir, ignore_errors=True)
             os.environ["SKIP_INST_DENOISE"] = "0"
+            _free_gpu_memory()  # trả VRAM của bước tách nhạc về GPU
             
             if count_files == 0:
                  yield None, log(f"Lỗi: Không tìm thấy file giọng tách được trong {temp_separate_dir}. Vui lòng kiểm tra lại log console.")
@@ -242,6 +258,7 @@ def automation_workflow(
             return
 
         yield None, log("Tách nhạc thành công.")
+        _free_gpu_memory()  # trả VRAM của bước tách nhạc về GPU
 
         # =================================================================================
         # BƯỚC 3: HUẤN LUYỆN MÔ HÌNH
@@ -289,7 +306,8 @@ def automation_workflow(
             for output in create_index(model_name, "v2", "Auto"):
                  yield None, log(output)
             
-            # Training
+            # Training — giải phóng VRAM trước (tiến trình train chạy process riêng, cần nhiều VRAM)
+            _free_gpu_memory()
             yield None, log("Đang huấn luyện (Training)... Việc này có thể mất thời gian.")
             for output in training(
                 model_name=model_name,
@@ -495,6 +513,7 @@ def train_workflow(training_files, model_name, epochs, force_retrain=False):
 
         shutil.rmtree(temp_separate_dir, ignore_errors=True)
         os.environ["SKIP_INST_DENOISE"] = "0"
+        _free_gpu_memory()  # trả VRAM của bước tách nhạc về GPU
 
         if count_files == 0:
             yield None, log("Lỗi: Không tìm thấy file giọng tách được. Vui lòng kiểm tra lại file ghi âm.")
@@ -549,6 +568,8 @@ def train_workflow(training_files, model_name, epochs, force_retrain=False):
         for output in create_index(model_name, "v2", "Auto"):
             yield None, log(output)
 
+        # Giải phóng VRAM trước khi train (tiến trình train chạy process riêng, cần nhiều VRAM)
+        _free_gpu_memory()
         yield None, log("Đang huấn luyện (Training)... Việc này có thể mất thời gian.")
         for output in training(
             model_name=model_name,
@@ -655,6 +676,7 @@ def convert_workflow(target_song, model_name, pitch_shift):
             return
 
         yield None, log("Tách nhạc thành công.")
+        _free_gpu_memory()  # trả VRAM của bước tách nhạc trước khi convert
 
         # ================= BƯỚC 2: ĐỔI GIỌNG VÀ GHÉP NHẠC =================
         yield None, log(f"== BẮT ĐẦU ĐỔI GIỌNG VÀ GHÉP NHẠC (Model: {model_name}) ==")

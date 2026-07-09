@@ -18,6 +18,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=0
       - CUDA_VISIBLE_DEVICES=0
       - PYTHONUNBUFFERED=1
+      # Giảm phân mảnh VRAM (khuyến nghị của PyTorch khi gặp OOM do fragmentation)
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       # API key đọc từ file .env trên host (không commit). Trống = API mở.
       - API_KEY=${API_KEY:-}
       # DB Postgres để đăng ký model theo khách hàng (đọc từ .env; trống = chỉ dùng filesystem)
