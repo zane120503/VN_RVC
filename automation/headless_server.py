@@ -641,6 +641,80 @@ async def convert_with_customer_model(
         "queue_size": q_size,
     }
 
+# =====================================================================================
+# DANH SÁCH BÀI HÁT + KIỂM TRA BÀI CÓ SẴN
+# =====================================================================================
+
+@app.get("/songs", dependencies=[Depends(verify_api_key)])
+def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """Danh sách bài hát (từ bảng ktv_song, chỉ các bài có media file_path).
+
+    - q: từ khóa tìm theo tên (có dấu hoặc không dấu đều được)
+    - limit/offset: phân trang (limit tối đa 200)
+    Lưu ý: bài thuộc build mới nhất có thể chưa đồng bộ lên media server —
+    dùng GET /check_song/{id} để xác nhận trước khi convert.
+    """
+    if not _db_enabled():
+        raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
+
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+
+    where = "deleted_flag IS NOT TRUE AND file_path IS NOT NULL AND file_path <> ''"
+    params = []
+    if q:
+        where += " AND (name ILIKE %s OR normalized_name ILIKE %s)"
+        params += [f"%{q}%", f"%{q}%"]
+
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM ktv_song WHERE {where}", params)
+            total = cur.fetchone()[0]
+            cur.execute(
+                f"SELECT id, name, duration, version FROM ktv_song WHERE {where} "
+                f"ORDER BY id DESC LIMIT %s OFFSET %s", params + [limit, offset])
+            songs = [
+                {"id": r[0], "name": r[1], "duration": r[2], "version": r[3]}
+                for r in cur.fetchall()
+            ]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
+
+    return {"total": total, "limit": limit, "offset": offset, "count": len(songs), "songs": songs}
+
+@app.get("/check_song/{song_id}", dependencies=[Depends(verify_api_key)])
+def check_song(song_id: str):
+    """Kiểm tra 1 bài hát có file audio sẵn trên media server không (trước khi /convert)."""
+    try:
+        r = requests.get(STREAM_INFO_URL, params={"id": song_id, "sourceType": "LOCAL"}, timeout=10)
+        r.raise_for_status()
+        info = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Không gọi được stream_info cho id={song_id}: {e}")
+
+    video_url = info.get("video")
+    if not video_url:
+        return {"song_id": song_id, "available": False, "reason": "stream_info không có media"}
+
+    if "/media/v/0/" in video_url:
+        return {"song_id": song_id, "available": False,
+                "reason": "Bài chưa xuất bản/đồng bộ lên media server (version v/0)"}
+
+    audio_url = video_url.rsplit("/", 1)[0] + "/" + TARGET_AUDIO_FILENAME
+    try:
+        h = requests.head(audio_url, timeout=10)
+        ok = (h.status_code == 200)
+    except Exception as e:
+        return {"song_id": song_id, "available": False, "reason": f"Lỗi kiểm tra media: {e}"}
+
+    size = h.headers.get("Content-Length")
+    return {
+        "song_id": song_id,
+        "available": ok,
+        "size_mb": round(int(size) / 1048576, 1) if (ok and size) else None,
+        "reason": None if ok else f"{TARGET_AUDIO_FILENAME} trả về HTTP {h.status_code}",
+    }
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "mode": "headless-async", "active_tasks": len(TASKS)}
