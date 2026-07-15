@@ -276,7 +276,74 @@ Luồng khuyến nghị cho app: `/songs?q=...` cho khách chọn bài → `/che
 
 ---
 
-## 9. API cũ (giữ để tương thích)
+## 9. `POST /api/files/upload/audio` — Upload file ghi âm của khách lên NAS 25 (MinIO)
+
+Giống hệt API upload record của hệ thống karaoke (cùng đường dẫn, cùng form field) —
+phòng hát chỉ cần trỏ `recordingConfig.url` vào server này là dùng được ngay.
+File audio + ảnh lưu lên MinIO (NAS 25), thông tin bản ghi lưu vào Postgres (bảng `rvc_recorded_files`).
+
+> ⚠️ Endpoint này yêu cầu `X-API-Key` như các API khác — client karaoke gốc không gửi
+> header này nên cần thêm vào Retrofit client (xem ghi chú cuối mục).
+
+```bash
+curl -X POST https://idolvoice.karaokeicool.vn/api/files/upload/audio \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "name=Đoạn Tuyệt Nàng Đi" \
+  -F "id=103666" \
+  -F "cluster_id=CL01" \
+  -F "room_code=P203" \
+  -F "created_time=2026-07-14 15:30:12" \
+  -F "is_4k=true" \
+  -F "singer_name=Anh Tuan" \
+  -F "audio=@ghi_am.wav" \
+  -F "image=@anh_bia.jpg"
+```
+
+| Field | Bắt buộc | Ý nghĩa |
+|---|---|---|
+| `audio` | ✅ | File ghi âm (wav/mp3...) |
+| `image` | ❌ | Ảnh bìa bài hát |
+| `name`, `id` | ❌ | Tên + id bài hát |
+| `cluster_id`, `room_code` | ❌ | Chi nhánh / phòng |
+| `singer_name` | ❌ | Tên người hát |
+| `is_4k` | ❌ | `true`/`false` |
+| `created_time` | ❌ | `YYYY-MM-DD HH:mm:ss` (mặc định = giờ server) |
+
+**Response:**
+```json
+{
+  "status": "uploaded",
+  "record_id": 12,
+  "bucket": "customer-records",
+  "audio_object": "CL01/P203/2026-07-14/153012_a1b2c3d4_103666.wav",
+  "image_object": "CL01/P203/2026-07-14/153012_a1b2c3d4_103666.jpg",
+  "size_mb": 4.2,
+  "created_time": "2026-07-14 15:30:12"
+}
+```
+
+File được tổ chức trên MinIO theo `{cluster_id}/{room_code}/{ngày}/{giờ}_{uuid}_{id bài}`;
+các field đi kèm được lưu vào metadata của object và vào bảng Postgres `rvc_recorded_files`
+(`record_id` trong response là id của dòng trong bảng).
+
+**Cấu hình server (biến môi trường / `.env`):** `MINIO_ENDPOINT` (mặc định `172.16.20.12:9100` — S3 API của container `minio-records` trên NAS; console web ở port 9101),
+`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` (bắt buộc), `MINIO_BUCKET` (mặc định `customer-records`),
+`MINIO_SECURE=1` nếu MinIO chạy https, `RECORD_TABLE` (mặc định `rvc_recorded_files`).
+
+**Ghi chú cho client karaoke (Kotlin/Retrofit):** thêm header `X-API-Key` vào request upload,
+ví dụ sửa `RecordingClient.kt`:
+```kotlin
+@Multipart
+@POST("api/files/upload/audio")
+fun uploadAudio(@Header("X-API-Key") apiKey: String,
+                @Part audio: MultipartBody.Part,
+                @PartMap params: Map<String, @JvmSuppressWildcards RequestBody>,
+                @Part image: MultipartBody.Part): Call<ResponseBody>
+```
+
+---
+
+## 10. API cũ (giữ để tương thích)
 
 ### `POST /run_upload` — Train + convert trong 1 lần gọi
 ```bash
@@ -313,8 +380,9 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 6 | GET | `/download/{task_id}` | Tải file kết quả | ✅ |
 | 7 | GET | `/songs` | Danh sách / tìm kiếm bài hát | ✅ |
 | 8 | GET | `/check_song/{song_id}` | Kiểm tra bài có sẵn để convert | ✅ |
-| 9 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
-| 10 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
+| 9 | POST | `/api/files/upload/audio` | Upload file ghi âm lên NAS 25 (MinIO) + lưu DB | ✅ |
+| 10 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
+| 11 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 
 ---
 
@@ -325,7 +393,8 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 400 | Thiếu tham số (vd: không gửi `target_song_id` lẫn `target_song`) / task chưa `completed` khi download | Kiểm tra request |
 | 401 | Sai hoặc thiếu `X-API-Key` | Gửi đúng header |
 | 404 | Khách chưa có model / `task_id` không tồn tại / bài hát không có media | Train trước; kiểm tra id |
-| 502 | Không lấy được audio theo `target_song_id` (bài chưa xuất bản `v/0`, media server lỗi) | Dùng id bài đã xuất bản hoặc upload file |
+| 502 | Không lấy được audio theo `target_song_id` (bài chưa xuất bản `v/0`, media server lỗi) / không kết nối được MinIO | Dùng id bài đã xuất bản hoặc upload file; kiểm tra NAS 25 |
+| 503 | Server chưa cấu hình DB hoặc MinIO (`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`) | Bổ sung biến môi trường rồi restart |
 | 500 | Lỗi xử lý nội bộ | Xem `logs` trong `/status`, báo quản trị |
 
 Task `failed` (qua `/status`): nguyên nhân phổ biến — dữ liệu train < 60 giây giọng thực tế, file âm thanh hỏng, hết VRAM (job trước quá nặng). Đọc trường `logs` để biết chi tiết.

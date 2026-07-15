@@ -289,6 +289,7 @@ def janitor_loop():
 def startup_event():
     """Start the worker + janitor threads on app startup."""
     init_model_table()
+    init_record_table()
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=janitor_loop, daemon=True).start()
 
@@ -713,6 +714,199 @@ def check_song(song_id: str):
         "available": ok,
         "size_mb": round(int(size) / 1048576, 1) if (ok and size) else None,
         "reason": None if ok else f"{TARGET_AUDIO_FILENAME} trả về HTTP {h.status_code}",
+    }
+
+# =====================================================================================
+# UPLOAD FILE GHI ÂM CỦA KHÁCH HÀNG LÊN NAS 25 (MinIO)
+# Giống hệt API "api/files/upload/audio" của karaoke_system (cùng đường dẫn, cùng form
+# field) để phòng karaoke trỏ recordingConfig.url vào server này là chạy được ngay.
+# File lưu trên MinIO, thông tin bản ghi lưu vào Postgres (bảng RECORD_TABLE).
+# Cấu hình qua biến môi trường: MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+# MINIO_BUCKET, MINIO_SECURE (1 = https), RECORD_TABLE.
+# =====================================================================================
+try:
+    from minio import Minio
+except ImportError:
+    Minio = None
+
+from datetime import datetime
+from urllib.parse import quote
+
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "172.16.20.12:9100")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "")
+MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "customer-records")
+MINIO_SECURE = os.environ.get("MINIO_SECURE", "0") == "1"
+
+_minio_client = None
+
+def _get_minio():
+    """Tạo (lazy) MinIO client + đảm bảo bucket tồn tại. Lỗi cấu hình/kết nối -> HTTP 503/502."""
+    global _minio_client
+    if Minio is None:
+        raise HTTPException(status_code=503, detail="Thiếu thư viện 'minio' trên server (pip install minio).")
+    if not (MINIO_ACCESS_KEY and MINIO_SECRET_KEY):
+        raise HTTPException(status_code=503, detail="Chưa cấu hình MINIO_ACCESS_KEY/MINIO_SECRET_KEY trên server.")
+    if _minio_client is None:
+        client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY,
+                       secret_key=MINIO_SECRET_KEY, secure=MINIO_SECURE)
+        try:
+            if not client.bucket_exists(MINIO_BUCKET):
+                client.make_bucket(MINIO_BUCKET)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Không kết nối được MinIO {MINIO_ENDPOINT}: {e}")
+        _minio_client = client
+    return _minio_client
+
+def _safe_name(value: str) -> str:
+    """Giữ chữ/số/gạch để làm tên thư mục/file trên MinIO."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value)).strip("_") or "unknown"
+
+# Bảng lưu thông tin bản ghi âm đã upload (Postgres, cùng DB với đăng ký model)
+RECORD_TABLE = os.environ.get("RECORD_TABLE", "rvc_recorded_files")
+
+def init_record_table():
+    if not _db_enabled():
+        return
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {RECORD_TABLE} (
+                    id           SERIAL PRIMARY KEY,
+                    media_id     VARCHAR,
+                    name         VARCHAR,
+                    cluster_id   VARCHAR,
+                    room_code    VARCHAR,
+                    singer_name  VARCHAR,
+                    is_4k        BOOLEAN DEFAULT FALSE,
+                    created_time VARCHAR,
+                    bucket       VARCHAR,
+                    audio_object VARCHAR NOT NULL,
+                    image_object VARCHAR,
+                    audio_size   BIGINT,
+                    uploaded_at  TIMESTAMP DEFAULT NOW()
+                )""")
+        print(f"DB bảng ghi âm sẵn sàng (bảng {RECORD_TABLE}).")
+    except Exception as e:
+        print(f"⚠️  Không khởi tạo được bảng ghi âm: {e}")
+
+def save_recorded_file(media_id, name, cluster_id, room_code, singer_name,
+                       is_4k, created_time, audio_object, image_object, audio_size):
+    """Ghi 1 dòng vào bảng RECORD_TABLE, trả về id của bản ghi."""
+    with _db_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""
+            INSERT INTO {RECORD_TABLE}
+                (media_id, name, cluster_id, room_code, singer_name, is_4k,
+                 created_time, bucket, audio_object, image_object, audio_size)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """, (media_id, name, cluster_id, room_code, singer_name, is_4k,
+                  created_time, MINIO_BUCKET, audio_object, image_object, audio_size))
+        return cur.fetchone()[0]
+
+def _put_minio(client, upload: UploadFile, object_name: str, default_type: str, metadata: dict):
+    """Stream 1 file upload lên MinIO, trả về kích thước file."""
+    upload.file.seek(0, os.SEEK_END)
+    size = upload.file.tell()
+    upload.file.seek(0)
+    if size <= 0:
+        raise HTTPException(status_code=400, detail=f"File '{upload.filename}' rỗng.")
+    try:
+        client.put_object(
+            MINIO_BUCKET, object_name, upload.file, size,
+            content_type=upload.content_type or default_type,
+            metadata=metadata,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Upload lên MinIO thất bại: {e}")
+    return size
+
+@app.post("/api/files/upload/audio", dependencies=[Depends(verify_api_key)])
+async def upload_audio(
+    name: Optional[str] = Form(None),
+    id: Optional[str] = Form(None),
+    cluster_id: Optional[str] = Form(None),
+    room_code: Optional[str] = Form(None),
+    created_time: Optional[str] = Form(None),
+    is_4k: Optional[str] = Form(None),
+    singer_name: Optional[str] = Form(None),
+    audio: UploadFile = File(...),
+    image: Optional[UploadFile] = File(None),
+):
+    """Upload file ghi âm của khách hàng — giống API của karaoke_system.
+
+    - Form field khớp với RecordingClient.kt: audio (file), image (file),
+      name, id, cluster_id, room_code, created_time, is_4k, singer_name.
+    - File audio + ảnh lưu lên MinIO (NAS 25), thông tin bản ghi lưu vào Postgres.
+    """
+    if not audio.filename:
+        raise HTTPException(status_code=400, detail="File audio thiếu tên file.")
+
+    client = _get_minio()
+
+    now = datetime.now()
+    if not created_time:
+        created_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Tổ chức: {cluster}/{phòng}/{ngày}/{giờ}_{uuid}_{id bài}_{tên file}
+    base_dir = "{}/{}/{}".format(
+        _safe_name(cluster_id or "unknown"),
+        _safe_name(room_code or "unknown"),
+        now.strftime("%Y-%m-%d"),
+    )
+    base_name = "{}_{}_{}".format(now.strftime("%H%M%S"), str(uuid.uuid4())[:8], _safe_name(id or "noid"))
+
+    audio_ext = os.path.splitext(audio.filename)[1] or ".wav"
+    audio_object = f"{base_dir}/{base_name}{audio_ext}"
+
+    # Metadata header chỉ nhận ASCII -> quote các giá trị (tên bài tiếng Việt...)
+    metadata = {
+        f"x-amz-meta-{k}": quote(str(v))
+        for k, v in {
+            "media_id": id,
+            "name": name,
+            "cluster_id": cluster_id,
+            "room_code": room_code,
+            "singer_name": singer_name,
+            "is_4k": is_4k,
+            "created_time": created_time,
+        }.items() if v
+    }
+
+    audio_size = _put_minio(client, audio, audio_object, "audio/mpeg", metadata)
+
+    image_object = None
+    if image is not None and image.filename:
+        image_ext = os.path.splitext(image.filename)[1] or ".jpg"
+        image_object = f"{base_dir}/{base_name}{image_ext}"
+        _put_minio(client, image, image_object, "image/jpeg", metadata)
+
+    # Lưu thông tin bản ghi vào DB (file đã nằm trên MinIO)
+    record_id = None
+    if _db_enabled():
+        try:
+            record_id = save_recorded_file(
+                media_id=id, name=name, cluster_id=cluster_id, room_code=room_code,
+                singer_name=singer_name, is_4k=str(is_4k).lower() == "true",
+                created_time=created_time, audio_object=audio_object,
+                image_object=image_object, audio_size=audio_size,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500,
+                                detail=f"File đã lên MinIO ({audio_object}) nhưng lưu DB thất bại: {e}")
+    else:
+        print("⚠️  [UploadAudio] DB chưa cấu hình -> chỉ lưu file lên MinIO, không có bản ghi DB.")
+
+    print(f"[UploadAudio] {name or audio.filename} -> {MINIO_BUCKET}/{audio_object} "
+          f"({round(audio_size/1048576, 2)} MB), db_id={record_id}")
+    return {
+        "status": "uploaded",
+        "record_id": record_id,
+        "bucket": MINIO_BUCKET,
+        "audio_object": audio_object,
+        "image_object": image_object,
+        "size_mb": round(audio_size / 1048576, 2),
+        "created_time": created_time,
     }
 
 @app.get("/health")

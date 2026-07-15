@@ -36,8 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# FastAPI cần python-multipart để nhận file upload; psycopg2 để đăng ký model theo khách hàng vào Postgres
-RUN pip install python-multipart psycopg2-binary
+# FastAPI cần python-multipart để nhận file upload; psycopg2 để đăng ký model theo khách hàng vào Postgres;
+# minio để upload file ghi âm của khách hàng lên NAS 25 (MinIO)
+RUN pip install python-multipart psycopg2-binary minio
 
 # --- Source code ---
 COPY . .

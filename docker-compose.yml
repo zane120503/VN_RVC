@@ -28,6 +28,14 @@ services:
       - DB_NAME=${DB_NAME:-}
       - DB_USER=${DB_USER:-}
       - DB_PASSWORD=${DB_PASSWORD:-}
+      # MinIO trên NAS 25 — nơi lưu file ghi âm của khách hàng (endpoint dạng host:port, không có http://)
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-172.16.20.12:9100}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
+      - MINIO_BUCKET=${MINIO_BUCKET:-customer-records}
+      - MINIO_SECURE=${MINIO_SECURE:-0}
+      # Bảng Postgres lưu thông tin bản ghi âm đã upload
+      - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
     # Cấp GPU cho container (cần nvidia-container-toolkit trên host)
     deploy:
       resources:
