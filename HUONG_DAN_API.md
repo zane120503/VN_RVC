@@ -3,7 +3,7 @@
 Hệ thống đổi giọng ca sĩ bằng giọng khách hàng, chạy headless trên GPU.
 
 - **Base URL:** `https://idolvoice.karaokeicool.vn`
-- **Xác thực:** header `X-API-Key: <key>` cho **mọi endpoint trừ `/health`**. Sai/thiếu key → `401`.
+- **Xác thực:** header `X-API-Key: <key>` cho mọi endpoint, **trừ 2 endpoint mở**: `/health` (healthcheck) và `/api/files/upload/audio` (tương thích client karaoke). Sai/thiếu key → `401`.
 - **Mô hình xử lý:** bất đồng bộ theo hàng đợi. Các API nặng trả về `task_id` ngay; dùng `/status/{task_id}` theo dõi và `/download/{task_id}` lấy kết quả. Server xử lý **tuần tự 1 task một lúc**.
 - **Swagger UI:** `https://idolvoice.karaokeicool.vn/docs` (thử API trực tiếp trên trình duyệt).
 
@@ -276,61 +276,86 @@ Luồng khuyến nghị cho app: `/songs?q=...` cho khách chọn bài → `/che
 
 ---
 
-## 9. `POST /api/files/upload/audio` — Upload file ghi âm của khách lên NAS 25 (MinIO)
+## 9. `POST /api/files/upload/audio` — Upload file ghi âm của khách lên NAS MinIO
 
-Giống hệt API upload record của hệ thống karaoke (cùng đường dẫn, cùng form field) —
-phòng hát chỉ cần trỏ `recordingConfig.url` vào server này là dùng được ngay.
-File audio + ảnh lưu lên MinIO (NAS 25), thông tin bản ghi lưu vào Postgres (bảng `rvc_recorded_files`).
+Nhận file ghi âm từ phòng karaoke và lưu trữ: **file audio + ảnh bìa lưu lên MinIO**
+(container `minio-records` trên NAS Synology), **thông tin bản ghi lưu vào Postgres**
+(bảng `rvc_recorded_files`).
 
-> ⚠️ Endpoint này **không yêu cầu** `X-API-Key` — giữ nguyên contract của client karaoke
-> (Retrofit không gửi header này), chỉ cần đổi `recordingConfig.url` là chạy, không sửa client.
+Endpoint này **giữ nguyên contract** của hệ thống karaoke (cùng đường dẫn, cùng form field,
+**không yêu cầu `X-API-Key`**) — phòng hát chỉ cần đổi `url` trong nhóm `recording` của
+remote config sang server này là chạy, **không sửa app karaoke**.
+
+**Content-Type:** `multipart/form-data`
+
+| Field | Kiểu | Bắt buộc | Client karaoke tự gửi |
+|---|---|---|---|
+| `audio` | file | ✅ | File ghi âm `.wav` (tên file = tên bài hát) |
+| `image` | file | ❌ | Ảnh bìa bài hát (tải từ hệ thống) |
+| `name` | text | ❌ | Tên bài hát |
+| `id` | text | ❌ | ID bài hát |
+| `cluster_id` | text | ❌ | Mã chi nhánh (`roomConfig.cluster`) |
+| `room_code` | text | ❌ | Mã phòng (`roomConfig.code`) |
+| `singer_name` | text | ❌ | Tên ca sĩ (hoặc `Youtube`/`Unknown`) |
+| `is_4k` | text | ❌ | Luôn `"true"` |
+| `created_time` | text | ❌ | `YYYY-MM-DD HH:mm:ss` giờ VN (không gửi → server lấy giờ hiện tại) |
 
 ```bash
 curl -X POST https://idolvoice.karaokeicool.vn/api/files/upload/audio \
+  -F "audio=@ghi_am.wav;type=audio/mpeg" \
+  -F "image=@anh_bia.jpg" \
   -F "name=Đoạn Tuyệt Nàng Đi" \
   -F "id=103666" \
-  -F "cluster_id=CL01" \
-  -F "room_code=P203" \
-  -F "created_time=2026-07-14 15:30:12" \
+  -F "cluster_id=IVP" \
+  -F "room_code=HUH" \
+  -F "created_time=2026-07-15 15:01:46" \
   -F "is_4k=true" \
-  -F "singer_name=Anh Tuan" \
-  -F "audio=@ghi_am.wav" \
-  -F "image=@anh_bia.jpg"
+  -F "singer_name=Anh Tuan"
 ```
 
-| Field | Bắt buộc | Ý nghĩa |
-|---|---|---|
-| `audio` | ✅ | File ghi âm (wav/mp3...) |
-| `image` | ❌ | Ảnh bìa bài hát |
-| `name`, `id` | ❌ | Tên + id bài hát |
-| `cluster_id`, `room_code` | ❌ | Chi nhánh / phòng |
-| `singer_name` | ❌ | Tên người hát |
-| `is_4k` | ❌ | `true`/`false` |
-| `created_time` | ❌ | `YYYY-MM-DD HH:mm:ss` (mặc định = giờ server) |
-
-**Response:**
+**Response `200`:**
 ```json
 {
   "status": "uploaded",
   "record_id": 12,
   "bucket": "customer-records",
-  "audio_object": "CL01/P203/2026-07-14/153012_a1b2c3d4_103666.wav",
-  "image_object": "CL01/P203/2026-07-14/153012_a1b2c3d4_103666.jpg",
-  "size_mb": 4.2,
-  "created_time": "2026-07-14 15:30:12"
+  "audio_object": "IVP/HUH/2026-07-15/080146_23b9df25_103666.mp3",
+  "image_object": "IVP/HUH/2026-07-15/080146_23b9df25_103666.jpg",
+  "size_mb": 5.18,
+  "created_time": "2026-07-15 15:01:46"
 }
 ```
 
-File được tổ chức trên MinIO theo `{cluster_id}/{room_code}/{ngày}/{giờ}_{uuid}_{id bài}`;
-các field đi kèm được lưu vào metadata của object và vào bảng Postgres `rvc_recorded_files`
-(`record_id` trong response là id của dòng trong bảng).
+**Cách lưu trữ:**
+- Object trên MinIO đặt theo `{cluster_id}/{room_code}/{ngày}/{giờ}_{uuid}_{id bài}.{đuôi}`;
+  ảnh bìa cùng tên, khác đuôi. Các field đi kèm được gắn vào metadata của object.
+- Mỗi lần upload thêm 1 dòng vào bảng Postgres `rvc_recorded_files`
+  (`media_id`, `name`, `cluster_id`, `room_code`, `singer_name`, `is_4k`, `created_time`,
+  `bucket`, `audio_object`, `image_object`, `audio_size`, `uploaded_at`) —
+  `record_id` trong response là id của dòng này. Bảng tự tạo khi server khởi động.
+- **Xem/tải file:** dùng MinIO Console `http://172.16.20.12:9101` (Object Browser →
+  bucket `customer-records`) hoặc S3 API port `9100`. **Không** duyệt trực tiếp thư mục
+  `minio/minio-records` trên NAS bằng File Station — MinIO lưu theo định dạng nội bộ
+  (mỗi object là 1 folder chứa `xl.meta`), sửa/xóa tay sẽ hỏng dữ liệu.
 
-**Cấu hình server (biến môi trường / `.env`):** `MINIO_ENDPOINT` (mặc định `172.16.20.12:9100` — S3 API của container `minio-records` trên NAS; console web ở port 9101),
-`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` (bắt buộc), `MINIO_BUCKET` (mặc định `customer-records`),
-`MINIO_SECURE=1` nếu MinIO chạy https, `RECORD_TABLE` (mặc định `rvc_recorded_files`).
+**Xử lý lỗi phía client karaoke:** app chỉ kiểm tra HTTP status — `2xx` = thành công
+(xóa bản ghi khỏi hàng đợi upload); khác `2xx` = giữ lại trong ObjectBox và **tự upload lại
+khi app khởi động** (bản ghi quá 1 tuần sẽ bị bỏ). Vì vậy server lỗi tạm thời không làm mất
+file ghi âm.
 
-**Client karaoke không cần sửa gì** — chỉ đổi `url` trong nhóm `recording` của remote config
-sang server này (nhớ dấu `/` ở cuối URL nếu client ghép đường dẫn tương đối).
+**Cấu hình server (biến môi trường / `.env`):**
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `MINIO_ENDPOINT` | `172.16.20.12:9100` | S3 API của MinIO (KHÔNG phải port console 9101) |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | — (bắt buộc) | Tài khoản MinIO |
+| `MINIO_BUCKET` | `customer-records` | Bucket lưu ghi âm (tự tạo nếu chưa có) |
+| `MINIO_SECURE` | `0` | `1` nếu MinIO chạy HTTPS |
+| `RECORD_TABLE` | `rvc_recorded_files` | Tên bảng Postgres lưu bản ghi |
+
+> 🔒 **Bảo mật:** endpoint này mở (không API key) để tương thích client karaoke. Nếu domain
+> public và muốn hạn chế, chặn ở tầng reverse-proxy (chỉ cho IP nội bộ gọi
+> `/api/files/upload/audio`) — không cần đụng vào client.
 
 ---
 
@@ -386,7 +411,7 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 404 | Khách chưa có model / `task_id` không tồn tại / bài hát không có media | Train trước; kiểm tra id |
 | 502 | Không lấy được audio theo `target_song_id` (bài chưa xuất bản `v/0`, media server lỗi) / không kết nối được MinIO | Dùng id bài đã xuất bản hoặc upload file; kiểm tra NAS 25 |
 | 503 | Server chưa cấu hình DB hoặc MinIO (`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`) | Bổ sung biến môi trường rồi restart |
-| 500 | Lỗi xử lý nội bộ | Xem `logs` trong `/status`, báo quản trị |
+| 500 | Lỗi xử lý nội bộ; riêng upload ghi âm: file đã lên MinIO nhưng ghi DB thất bại (detail có ghi rõ) | Xem `logs` trong `/status` hoặc `detail`, báo quản trị |
 
 Task `failed` (qua `/status`): nguyên nhân phổ biến — dữ liệu train < 60 giây giọng thực tế, file âm thanh hỏng, hết VRAM (job trước quá nặng). Đọc trường `logs` để biết chi tiết.
 
