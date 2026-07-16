@@ -282,12 +282,11 @@ Giống hệt API upload record của hệ thống karaoke (cùng đường dẫ
 phòng hát chỉ cần trỏ `recordingConfig.url` vào server này là dùng được ngay.
 File audio + ảnh lưu lên MinIO (NAS 25), thông tin bản ghi lưu vào Postgres (bảng `rvc_recorded_files`).
 
-> ⚠️ Endpoint này yêu cầu `X-API-Key` như các API khác — client karaoke gốc không gửi
-> header này nên cần thêm vào Retrofit client (xem ghi chú cuối mục).
+> ⚠️ Endpoint này **không yêu cầu** `X-API-Key` — giữ nguyên contract của client karaoke
+> (Retrofit không gửi header này), chỉ cần đổi `recordingConfig.url` là chạy, không sửa client.
 
 ```bash
 curl -X POST https://idolvoice.karaokeicool.vn/api/files/upload/audio \
-  -H "X-API-Key: YOUR_API_KEY" \
   -F "name=Đoạn Tuyệt Nàng Đi" \
   -F "id=103666" \
   -F "cluster_id=CL01" \
@@ -330,16 +329,8 @@ các field đi kèm được lưu vào metadata của object và vào bảng Pos
 `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` (bắt buộc), `MINIO_BUCKET` (mặc định `customer-records`),
 `MINIO_SECURE=1` nếu MinIO chạy https, `RECORD_TABLE` (mặc định `rvc_recorded_files`).
 
-**Ghi chú cho client karaoke (Kotlin/Retrofit):** thêm header `X-API-Key` vào request upload,
-ví dụ sửa `RecordingClient.kt`:
-```kotlin
-@Multipart
-@POST("api/files/upload/audio")
-fun uploadAudio(@Header("X-API-Key") apiKey: String,
-                @Part audio: MultipartBody.Part,
-                @PartMap params: Map<String, @JvmSuppressWildcards RequestBody>,
-                @Part image: MultipartBody.Part): Call<ResponseBody>
-```
+**Client karaoke không cần sửa gì** — chỉ đổi `url` trong nhóm `recording` của remote config
+sang server này (nhớ dấu `/` ở cuối URL nếu client ghép đường dẫn tương đối).
 
 ---
 
@@ -380,7 +371,7 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 6 | GET | `/download/{task_id}` | Tải file kết quả | ✅ |
 | 7 | GET | `/songs` | Danh sách / tìm kiếm bài hát | ✅ |
 | 8 | GET | `/check_song/{song_id}` | Kiểm tra bài có sẵn để convert | ✅ |
-| 9 | POST | `/api/files/upload/audio` | Upload file ghi âm lên NAS 25 (MinIO) + lưu DB | ✅ |
+| 9 | POST | `/api/files/upload/audio` | Upload file ghi âm lên NAS 25 (MinIO) + lưu DB | ❌ |
 | 10 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
 | 11 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 

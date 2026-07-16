@@ -821,7 +821,9 @@ def _put_minio(client, upload: UploadFile, object_name: str, default_type: str, 
         raise HTTPException(status_code=502, detail=f"Upload lên MinIO thất bại: {e}")
     return size
 
-@app.post("/api/files/upload/audio", dependencies=[Depends(verify_api_key)])
+# Không yêu cầu X-API-Key: giữ nguyên contract của karaoke_system (client Retrofit
+# không gửi header này) — chỉ cần đổi recordingConfig.url là dùng được, không sửa client.
+@app.post("/api/files/upload/audio")
 async def upload_audio(
     name: Optional[str] = Form(None),
     id: Optional[str] = Form(None),
