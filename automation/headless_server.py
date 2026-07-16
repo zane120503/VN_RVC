@@ -151,6 +151,61 @@ def get_customer_model(customer_id):
         print(f"[DB] Lỗi đọc model khách {customer_id}: {e}")
         return None
 
+# =====================================================================================
+# DB DANH SÁCH BÀI ĐÃ CONVERT (để khách nghe thử rồi chọn tải)
+# =====================================================================================
+CONVERT_TABLE = os.environ.get("CONVERT_TABLE", "rvc_converted_songs")
+
+def init_convert_table():
+    if not _db_enabled():
+        return
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {CONVERT_TABLE} (
+                    id          SERIAL PRIMARY KEY,
+                    task_id     VARCHAR,
+                    customer_id VARCHAR,
+                    model_name  VARCHAR,
+                    song_id     VARCHAR,
+                    song_name   VARCHAR,
+                    pitch_shift INTEGER,
+                    result_path VARCHAR NOT NULL,
+                    file_size   BIGINT,
+                    created_at  TIMESTAMP DEFAULT NOW()
+                )""")
+        print(f"DB danh sách convert sẵn sàng (bảng {CONVERT_TABLE}).")
+    except Exception as e:
+        print(f"⚠️  Không khởi tạo được bảng convert: {e}")
+
+def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pitch_shift, result_path):
+    """Lưu 1 bản convert hoàn tất để khách nghe thử / tải lại sau."""
+    if not _db_enabled():
+        return
+    try:
+        size = os.path.getsize(result_path) if os.path.exists(result_path) else None
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {CONVERT_TABLE}
+                    (task_id, customer_id, model_name, song_id, song_name, pitch_shift, result_path, file_size)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (task_id, customer_id, model_name, song_id, song_name, pitch_shift, result_path, size))
+        print(f"[DB] Đã lưu bản convert của khách {customer_id}: {result_path}")
+    except Exception as e:
+        print(f"[DB] Lỗi lưu bản convert khách {customer_id}: {e}")
+
+def lookup_song_name(song_id):
+    """Lấy tên bài hát từ bảng ktv_song (best-effort, lỗi thì trả None)."""
+    if not (song_id and _db_enabled()):
+        return None
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT name FROM ktv_song WHERE id = %s", (song_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
+
 def worker_loop():
     """Consumes tasks from the queue and processes them sequentially."""
     print("Worker thread started, waiting for tasks...")
@@ -227,6 +282,18 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                     index_file=os.path.basename(_pick_index_file(payload["model_name"]) or "") or None,
                     epochs=payload.get("epochs"),
                 )
+
+            # Convert xong -> lưu vào danh sách để khách nghe thử rồi chọn tải
+            if kind == "convert":
+                save_converted_song(
+                    task_id=task_id,
+                    customer_id=payload.get("customer_id"),
+                    model_name=payload.get("model_name"),
+                    song_id=payload.get("song_id"),
+                    song_name=payload.get("song_name"),
+                    pitch_shift=payload.get("pitch_shift"),
+                    result_path=final_output,
+                )
         else:
             TASKS[task_id]["status"] = "failed"
             TASKS[task_id]["message"] = "Workflow completed but no output file generated."
@@ -290,6 +357,7 @@ def startup_event():
     """Start the worker + janitor threads on app startup."""
     init_model_table()
     init_record_table()
+    init_convert_table()
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=janitor_loop, daemon=True).start()
 
@@ -606,10 +674,12 @@ async def convert_with_customer_model(
 
     if target_song_id:
         target_path = fetch_target_by_id(target_song_id, session_dir)
+        song_name = lookup_song_name(target_song_id)
     elif target_song is not None and target_song.filename:
         target_path = os.path.join(session_dir, os.path.basename(target_song.filename))
         with open(target_path, "wb") as out:
             shutil.copyfileobj(target_song.file, out)
+        song_name = os.path.splitext(os.path.basename(target_song.filename))[0]
     else:
         raise HTTPException(status_code=400, detail="Cần cung cấp target_song_id hoặc target_song (file).")
 
@@ -629,6 +699,8 @@ async def convert_with_customer_model(
         "model_name": model_name,
         "pitch_shift": pitch_shift,
         "customer_id": customer_id,
+        "song_id": target_song_id,
+        "song_name": song_name,
     }))
     q_size = TASK_QUEUE.qsize()
     print(f"[Convert] Task {task_id} queued for customer {customer_id}. Queue size: {q_size}")
@@ -715,6 +787,106 @@ def check_song(song_id: str):
         "size_mb": round(int(size) / 1048576, 1) if (ok and size) else None,
         "reason": None if ok else f"{TARGET_AUDIO_FILENAME} trả về HTTP {h.status_code}",
     }
+
+# =====================================================================================
+# DANH SÁCH BÀI ĐÃ CONVERT — khách nghe thử rồi chọn tải
+# =====================================================================================
+
+def _flex_api_key(key: str = Security(api_key_header), api_key: Optional[str] = None):
+    """Như verify_api_key nhưng nhận thêm query ?api_key= — để thẻ <audio src=...> phát được
+    (trình duyệt không gửi được header tùy chỉnh trong thẻ audio/video)."""
+    if not API_KEY:
+        return
+    if key == API_KEY or api_key == API_KEY:
+        return
+    raise HTTPException(status_code=401, detail="API key sai hoặc thiếu (header X-API-Key hoặc ?api_key=).")
+
+_AUDIO_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+                ".m4a": "audio/mp4", ".ogg": "audio/ogg"}
+
+def _get_conversion(conversion_id: int):
+    if not _db_enabled():
+        raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, customer_id, song_id, song_name, pitch_shift, result_path, file_size, created_at "
+                f"FROM {CONVERT_TABLE} WHERE id = %s", (conversion_id,))
+            row = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
+    if not row:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản convert.")
+    return {
+        "id": row[0], "customer_id": row[1], "song_id": row[2], "song_name": row[3],
+        "pitch_shift": row[4], "result_path": row[5], "file_size": row[6], "created_at": str(row[7]),
+    }
+
+def _conversion_file(conv):
+    """Trả (path, media_type) của file kết quả; file đã bị janitor dọn -> 410."""
+    path = conv["result_path"]
+    if not path or not os.path.exists(path):
+        raise HTTPException(
+            status_code=410,
+            detail=f"File đã bị dọn (giữ tối đa {RETENTION_DAYS} ngày). Hãy gọi /convert lại.")
+    media = _AUDIO_TYPES.get(os.path.splitext(path)[1].lower(), "audio/mpeg")
+    return path, media
+
+@app.get("/conversions/{customer_id}", dependencies=[Depends(verify_api_key)])
+def list_conversions(customer_id: str, limit: int = 50, offset: int = 0):
+    """Danh sách các bản đã convert của khách (mới nhất trước) — nghe thử rồi chọn tải.
+
+    `available=false` nghĩa là file kết quả đã bị dọn sau RETENTION_DAYS ngày (convert lại nếu cần).
+    """
+    if not _db_enabled():
+        raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
+
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {CONVERT_TABLE} WHERE customer_id = %s", (customer_id,))
+            total = cur.fetchone()[0]
+            cur.execute(
+                f"SELECT id, song_id, song_name, pitch_shift, result_path, file_size, created_at "
+                f"FROM {CONVERT_TABLE} WHERE customer_id = %s ORDER BY id DESC LIMIT %s OFFSET %s",
+                (customer_id, limit, offset))
+            rows = cur.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
+
+    items = []
+    for r in rows:
+        available = bool(r[4]) and os.path.exists(r[4])
+        items.append({
+            "conversion_id": r[0],
+            "song_id": r[1],
+            "song_name": r[2] or (os.path.basename(r[4]) if r[4] else None),
+            "pitch_shift": r[3],
+            "size_mb": round(r[5] / 1048576, 2) if r[5] else None,
+            "created_at": str(r[6]),
+            "available": available,
+            "stream_url": f"/conversions/{r[0]}/stream",
+            "download_url": f"/conversions/{r[0]}/download",
+        })
+    return {"customer_id": customer_id, "total": total, "limit": limit, "offset": offset,
+            "count": len(items), "conversions": items}
+
+@app.get("/conversions/{conversion_id}/stream", dependencies=[Depends(_flex_api_key)])
+def stream_conversion(conversion_id: int):
+    """Nghe thử bản convert — phát trực tiếp (inline), dùng được cho <audio src="...?api_key=KEY">."""
+    conv = _get_conversion(conversion_id)
+    path, media = _conversion_file(conv)
+    return FileResponse(path, media_type=media)
+
+@app.get("/conversions/{conversion_id}/download", dependencies=[Depends(_flex_api_key)])
+def download_conversion(conversion_id: int):
+    """Tải bản convert về (Content-Disposition: attachment, tên file = tên bài hát)."""
+    conv = _get_conversion(conversion_id)
+    path, media = _conversion_file(conv)
+    filename = (conv["song_name"] or f"conversion_{conversion_id}") + os.path.splitext(path)[1]
+    return FileResponse(path, media_type=media, filename=filename)
 
 # =====================================================================================
 # UPLOAD FILE GHI ÂM CỦA KHÁCH HÀNG LÊN NAS 25 (MinIO)

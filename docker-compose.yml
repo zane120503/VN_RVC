@@ -36,6 +36,8 @@ services:
       - MINIO_SECURE=${MINIO_SECURE:-0}
       # Bảng Postgres lưu thông tin bản ghi âm đã upload
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
+      # Bảng Postgres lưu danh sách bài đã convert (khách nghe thử rồi tải)
+      - CONVERT_TABLE=${CONVERT_TABLE:-rvc_converted_songs}
     # Cấp GPU cho container (cần nvidia-container-toolkit trên host)
     deploy:
       resources:

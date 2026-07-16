@@ -17,7 +17,9 @@ Hệ thống đổi giọng ca sĩ bằng giọng khách hàng, chạy headless 
    GET  /status/{task_id}        → poll đến khi completed
 3. POST /convert                 → đổi giọng bài hát bằng model của khách
    GET  /status/{task_id}        → poll đến khi completed
-4. GET  /download/{task_id}      → tải file bài hát đã đổi giọng (.mp3)
+4. GET  /conversions/{customer_id} → danh sách bản đã convert của khách
+   GET  /conversions/{id}/stream    → khách nghe thử
+   GET  /conversions/{id}/download  → ưng ý thì tải về
 ```
 
 Khách quay lại lần sau: bỏ qua bước 2, gọi thẳng `/convert`. Muốn train dữ liệu mới thay model cũ: `/train` với `force_retrain=true`.
@@ -359,7 +361,88 @@ file ghi âm.
 
 ---
 
-## 10. API cũ (giữ để tương thích)
+## 10. Danh sách bài đã convert — nghe thử rồi tải
+
+Mỗi lần task `/convert` hoàn tất, kết quả được ghi vào bảng `rvc_converted_songs`.
+Bộ 3 endpoint này cho app hiển thị danh sách bản đã convert của khách, **phát nghe thử**
+rồi mới **tải về** — không phụ thuộc `task_id` (vốn mất khi server restart).
+
+### `GET /conversions/{customer_id}` — Danh sách bản đã convert của khách
+
+| Tham số (query) | Mặc định | Mô tả |
+|---|---|---|
+| `limit` | 50 | Số bản mỗi trang (tối đa 200) |
+| `offset` | 0 | Phân trang |
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  "https://idolvoice.karaokeicool.vn/conversions/KH001?limit=20"
+```
+
+**Response `200`:**
+```json
+{
+  "customer_id": "KH001",
+  "total": 2, "limit": 20, "offset": 0, "count": 2,
+  "conversions": [
+    {
+      "conversion_id": 2,
+      "song_id": "103691",
+      "song_name": "HẸN YÊU",
+      "pitch_shift": 0,
+      "size_mb": 4.5,
+      "created_at": "2026-07-16 10:20:00",
+      "available": true,
+      "stream_url": "/conversions/2/stream",
+      "download_url": "/conversions/2/download"
+    },
+    {
+      "conversion_id": 1,
+      "song_id": null,
+      "song_name": "bai_upload",
+      "pitch_shift": 0,
+      "size_mb": 5.1,
+      "created_at": "2026-07-01 09:00:00",
+      "available": false,
+      "stream_url": "/conversions/1/stream",
+      "download_url": "/conversions/1/download"
+    }
+  ]
+}
+```
+
+`available: false` = file kết quả đã bị dọn (giữ tối đa **10 ngày**) — gọi `/convert` lại nếu khách muốn nghe.
+
+### `GET /conversions/{id}/stream` — Nghe thử (phát trực tiếp)
+
+Trả file audio **inline** để phát ngay. Ngoài header `X-API-Key`, endpoint nhận key qua
+**query `?api_key=`** — vì thẻ `<audio>` của trình duyệt không gửi được header tùy chỉnh:
+
+```html
+<audio controls src="https://idolvoice.karaokeicool.vn/conversions/2/stream?api_key=YOUR_API_KEY"></audio>
+```
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  "https://idolvoice.karaokeicool.vn/conversions/2/stream" -o nghe_thu.mp3
+```
+
+### `GET /conversions/{id}/download` — Tải về
+
+Như `/stream` nhưng trả `Content-Disposition: attachment` (trình duyệt tải file thay vì phát),
+tên file = tên bài hát. Cũng nhận key qua header hoặc `?api_key=`.
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  "https://idolvoice.karaokeicool.vn/conversions/2/download" -O -J
+```
+
+**Lỗi riêng của nhóm này:** `404` = `conversion_id` không tồn tại; `410` = bản ghi còn trong
+DB nhưng file đã bị dọn sau 10 ngày.
+
+---
+
+## 11. API cũ (giữ để tương thích)
 
 ### `POST /run_upload` — Train + convert trong 1 lần gọi
 ```bash
@@ -397,8 +480,11 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 7 | GET | `/songs` | Danh sách / tìm kiếm bài hát | ✅ |
 | 8 | GET | `/check_song/{song_id}` | Kiểm tra bài có sẵn để convert | ✅ |
 | 9 | POST | `/api/files/upload/audio` | Upload file ghi âm lên NAS 25 (MinIO) + lưu DB | ❌ |
-| 10 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
-| 11 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
+| 10 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
+| 11 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
+| 12 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
+| 13 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
+| 14 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 
 ---
 
@@ -408,7 +494,8 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 |---|---|---|
 | 400 | Thiếu tham số (vd: không gửi `target_song_id` lẫn `target_song`) / task chưa `completed` khi download | Kiểm tra request |
 | 401 | Sai hoặc thiếu `X-API-Key` | Gửi đúng header |
-| 404 | Khách chưa có model / `task_id` không tồn tại / bài hát không có media | Train trước; kiểm tra id |
+| 404 | Khách chưa có model / `task_id` không tồn tại / bài hát không có media / `conversion_id` không tồn tại | Train trước; kiểm tra id |
+| 410 | Bản convert còn trong DB nhưng file đã bị dọn (quá 10 ngày) | Gọi `/convert` lại |
 | 502 | Không lấy được audio theo `target_song_id` (bài chưa xuất bản `v/0`, media server lỗi) / không kết nối được MinIO | Dùng id bài đã xuất bản hoặc upload file; kiểm tra NAS 25 |
 | 503 | Server chưa cấu hình DB hoặc MinIO (`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`) | Bổ sung biến môi trường rồi restart |
 | 500 | Lỗi xử lý nội bộ; riêng upload ghi âm: file đã lên MinIO nhưng ghi DB thất bại (detail có ghi rõ) | Xem `logs` trong `/status` hoặc `detail`, báo quản trị |
