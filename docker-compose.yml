@@ -38,6 +38,9 @@ services:
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
       # Bảng Postgres lưu danh sách bài đã convert (khách nghe thử rồi tải)
       - CONVERT_TABLE=${CONVERT_TABLE:-rvc_converted_songs}
+      # Thời gian giữ file trong audios/: kết quả convert (*_COVER_*) và file trung gian
+      - RESULT_RETENTION_DAYS=${RESULT_RETENTION_DAYS:-90}
+      - RETENTION_DAYS=${RETENTION_DAYS:-10}
     # Cấp GPU cho container (cần nvidia-container-toolkit trên host)
     deploy:
       resources:

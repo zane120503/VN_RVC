@@ -322,29 +322,37 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
 # JANITOR: tự động xóa file cũ trong audios/ để không đầy đĩa
 # =====================================================================================
 AUDIOS_ROOT = os.environ.get("AUDIOS_ROOT", "audios")   # khớp thư mục output của workflow
-RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "10"))   # xóa file cũ hơn N ngày
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "10"))   # file trung gian: xóa sau N ngày
+# File KẾT QUẢ convert (audios/*_COVER_*.mp3) giữ lâu hơn để khách nghe lại/tải về
+RESULT_RETENTION_DAYS = int(os.environ.get("RESULT_RETENTION_DAYS", "90"))
 JANITOR_INTERVAL_SEC = int(os.environ.get("JANITOR_INTERVAL_SEC", str(6 * 3600)))  # quét mỗi 6h
 
 def cleanup_old_files():
-    """Xóa file/thư mục trong audios/ có thời gian sửa đổi cũ hơn RETENTION_DAYS."""
-    if RETENTION_DAYS <= 0 or not os.path.isdir(AUDIOS_ROOT):
+    """Dọn audios/ theo 2 mức: file kết quả (*_COVER_*) giữ RESULT_RETENTION_DAYS ngày,
+    mọi thứ khác (file trung gian: tách beat/vocal, stub, target tải về...) giữ RETENTION_DAYS ngày."""
+    if not os.path.isdir(AUDIOS_ROOT):
         return
-    cutoff = time.time() - RETENTION_DAYS * 86400
+    now = time.time()
     for entry in os.listdir(AUDIOS_ROOT):
         path = os.path.join(AUDIOS_ROOT, entry)
+        is_result = os.path.isfile(path) and "_COVER_" in entry
+        days = RESULT_RETENTION_DAYS if is_result else RETENTION_DAYS
+        if days <= 0:
+            continue
         try:
-            if os.path.getmtime(path) >= cutoff:
+            if os.path.getmtime(path) >= now - days * 86400:
                 continue
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
             else:
                 os.remove(path)
-            print(f"[Janitor] Đã xóa (cũ hơn {RETENTION_DAYS} ngày): {path}")
+            print(f"[Janitor] Đã xóa ({'kết quả' if is_result else 'trung gian'}, cũ hơn {days} ngày): {path}")
         except Exception as e:
             print(f"[Janitor] Lỗi khi xóa {path}: {e}")
 
 def janitor_loop():
-    print(f"Janitor thread started (xóa file audios/ cũ hơn {RETENTION_DAYS} ngày, quét mỗi {JANITOR_INTERVAL_SEC//3600}h).")
+    print(f"Janitor thread started (file kết quả giữ {RESULT_RETENTION_DAYS} ngày, "
+          f"file trung gian {RETENTION_DAYS} ngày, quét mỗi {JANITOR_INTERVAL_SEC//3600}h).")
     while True:
         try:
             cleanup_old_files()
@@ -828,7 +836,7 @@ def _conversion_file(conv):
     if not path or not os.path.exists(path):
         raise HTTPException(
             status_code=410,
-            detail=f"File đã bị dọn (giữ tối đa {RETENTION_DAYS} ngày). Hãy gọi /convert lại.")
+            detail=f"File đã bị dọn (giữ tối đa {RESULT_RETENTION_DAYS} ngày). Hãy gọi /convert lại.")
     media = _AUDIO_TYPES.get(os.path.splitext(path)[1].lower(), "audio/mpeg")
     return path, media
 
@@ -836,7 +844,7 @@ def _conversion_file(conv):
 def list_conversions(customer_id: str, limit: int = 50, offset: int = 0):
     """Danh sách các bản đã convert của khách (mới nhất trước) — nghe thử rồi chọn tải.
 
-    `available=false` nghĩa là file kết quả đã bị dọn sau RETENTION_DAYS ngày (convert lại nếu cần).
+    `available=false` nghĩa là file kết quả đã bị dọn sau RESULT_RETENTION_DAYS ngày (convert lại nếu cần).
     """
     if not _db_enabled():
         raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")

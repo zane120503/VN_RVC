@@ -214,7 +214,7 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 
 - Task `convert`/`run_upload`: trả file **bài hát đã đổi giọng (.mp3)**.
 - Task `train`: trả file model `.pth` (thường không cần tải — model đã lưu trên server).
-- File kết quả được giữ trên server **10 ngày** rồi tự xóa → tải về/lưu lại trong thời gian đó.
+- File kết quả được giữ trên server **90 ngày (3 tháng)** rồi tự xóa → tải về/lưu lại trong thời gian đó.
 
 ---
 
@@ -411,7 +411,7 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 }
 ```
 
-`available: false` = file kết quả đã bị dọn (giữ tối đa **10 ngày**) — gọi `/convert` lại nếu khách muốn nghe.
+`available: false` = file kết quả đã bị dọn (giữ tối đa **90 ngày / 3 tháng**) — gọi `/convert` lại nếu khách muốn nghe.
 
 ### `GET /conversions/{id}/stream` — Nghe thử (phát trực tiếp)
 
@@ -438,7 +438,7 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 ```
 
 **Lỗi riêng của nhóm này:** `404` = `conversion_id` không tồn tại; `410` = bản ghi còn trong
-DB nhưng file đã bị dọn sau 10 ngày.
+DB nhưng file đã bị dọn sau 90 ngày.
 
 ---
 
@@ -495,7 +495,7 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 400 | Thiếu tham số (vd: không gửi `target_song_id` lẫn `target_song`) / task chưa `completed` khi download | Kiểm tra request |
 | 401 | Sai hoặc thiếu `X-API-Key` | Gửi đúng header |
 | 404 | Khách chưa có model / `task_id` không tồn tại / bài hát không có media / `conversion_id` không tồn tại | Train trước; kiểm tra id |
-| 410 | Bản convert còn trong DB nhưng file đã bị dọn (quá 10 ngày) | Gọi `/convert` lại |
+| 410 | Bản convert còn trong DB nhưng file đã bị dọn (quá 90 ngày) | Gọi `/convert` lại |
 | 502 | Không lấy được audio theo `target_song_id` (bài chưa xuất bản `v/0`, media server lỗi) / không kết nối được MinIO | Dùng id bài đã xuất bản hoặc upload file; kiểm tra NAS 25 |
 | 503 | Server chưa cấu hình DB hoặc MinIO (`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`) | Bổ sung biến môi trường rồi restart |
 | 500 | Lỗi xử lý nội bộ; riêng upload ghi âm: file đã lên MinIO nhưng ghi DB thất bại (detail có ghi rõ) | Xem `logs` trong `/status` hoặc `detail`, báo quản trị |
@@ -551,6 +551,6 @@ echo "Xong: ket_qua.mp3"
 
 - **`pitch_shift`** (nửa cung): cùng giới tính `0`; model nam hát bài ca sĩ nữ `-12`; model nữ hát bài ca sĩ nam `+12`; lệch nhẹ thử `±3..6`.
 - **Model theo khách được giữ vĩnh viễn** (`assets/weights/` + DB) — convert các lần sau không cần train lại.
-- File upload input tự xóa sau khi task xong; file kết quả trong `audios/` tự xóa sau **10 ngày**.
+- File upload input tự xóa sau khi task xong; file **kết quả convert** trong `audios/` giữ **90 ngày (3 tháng)** rồi tự xóa (đổi bằng biến `RESULT_RETENTION_DAYS`); file trung gian (tách beat/vocal...) dọn sau **10 ngày** (`RETENTION_DAYS`).
 - Server xử lý tuần tự — nhiều request cùng lúc sẽ xếp hàng (xem `queue_size` trong response).
 - Task registry nằm trong RAM: restart server làm mất `task_id` đang theo dõi (model/kết quả trên đĩa không mất).
