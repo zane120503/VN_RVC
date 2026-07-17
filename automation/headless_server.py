@@ -171,14 +171,18 @@ def init_convert_table():
                     song_name   VARCHAR,
                     pitch_shift INTEGER,
                     result_path VARCHAR NOT NULL,
+                    result_object VARCHAR,
                     file_size   BIGINT,
                     created_at  TIMESTAMP DEFAULT NOW()
                 )""")
+            # Bảng tạo từ bản cũ chưa có cột result_object -> bổ sung
+            cur.execute(f"ALTER TABLE {CONVERT_TABLE} ADD COLUMN IF NOT EXISTS result_object VARCHAR")
         print(f"DB danh sách convert sẵn sàng (bảng {CONVERT_TABLE}).")
     except Exception as e:
         print(f"⚠️  Không khởi tạo được bảng convert: {e}")
 
-def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pitch_shift, result_path):
+def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pitch_shift,
+                        result_path, result_object=None):
     """Lưu 1 bản convert hoàn tất để khách nghe thử / tải lại sau."""
     if not _db_enabled():
         return
@@ -187,10 +191,12 @@ def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pi
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(f"""
                 INSERT INTO {CONVERT_TABLE}
-                    (task_id, customer_id, model_name, song_id, song_name, pitch_shift, result_path, file_size)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (task_id, customer_id, model_name, song_id, song_name, pitch_shift, result_path, size))
-        print(f"[DB] Đã lưu bản convert của khách {customer_id}: {result_path}")
+                    (task_id, customer_id, model_name, song_id, song_name, pitch_shift,
+                     result_path, result_object, file_size)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (task_id, customer_id, model_name, song_id, song_name, pitch_shift,
+                      result_path, result_object, size))
+        print(f"[DB] Đã lưu bản convert của khách {customer_id}: {result_path} (minio: {result_object})")
     except Exception as e:
         print(f"[DB] Lỗi lưu bản convert khách {customer_id}: {e}")
 
@@ -283,8 +289,9 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                     epochs=payload.get("epochs"),
                 )
 
-            # Convert xong -> lưu vào danh sách để khách nghe thử rồi chọn tải
+            # Convert xong -> đẩy kết quả lên MinIO + lưu vào danh sách để khách nghe thử rồi tải
             if kind == "convert":
+                result_object = upload_result_to_minio(final_output, payload.get("customer_id"))
                 save_converted_song(
                     task_id=task_id,
                     customer_id=payload.get("customer_id"),
@@ -293,6 +300,7 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                     song_name=payload.get("song_name"),
                     pitch_shift=payload.get("pitch_shift"),
                     result_path=final_output,
+                    result_object=result_object,
                 )
         else:
             TASKS[task_id]["status"] = "failed"
@@ -425,7 +433,7 @@ def get_task_status(task_id: str):
         **TASKS[task_id]
     }
 
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 @app.get("/download/{task_id}", dependencies=[Depends(verify_api_key)])
 def download_result(task_id: str):
@@ -818,7 +826,8 @@ def _get_conversion(conversion_id: int):
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, customer_id, song_id, song_name, pitch_shift, result_path, file_size, created_at "
+                f"SELECT id, customer_id, song_id, song_name, pitch_shift, result_path, "
+                f"result_object, file_size, created_at "
                 f"FROM {CONVERT_TABLE} WHERE id = %s", (conversion_id,))
             row = cur.fetchone()
     except Exception as e:
@@ -827,18 +836,53 @@ def _get_conversion(conversion_id: int):
         raise HTTPException(status_code=404, detail="Không tìm thấy bản convert.")
     return {
         "id": row[0], "customer_id": row[1], "song_id": row[2], "song_name": row[3],
-        "pitch_shift": row[4], "result_path": row[5], "file_size": row[6], "created_at": str(row[7]),
+        "pitch_shift": row[4], "result_path": row[5], "result_object": row[6],
+        "file_size": row[7], "created_at": str(row[8]),
     }
 
-def _conversion_file(conv):
-    """Trả (path, media_type) của file kết quả; file đã bị janitor dọn -> 410."""
+def _serve_conversion(conv, as_download: bool):
+    """Phục vụ file kết quả: ưu tiên file local (nhanh), hết local thì stream từ MinIO.
+    Cả hai nơi đều hết (quá hạn lưu) -> 410."""
     path = conv["result_path"]
-    if not path or not os.path.exists(path):
-        raise HTTPException(
-            status_code=410,
-            detail=f"File đã bị dọn (giữ tối đa {RESULT_RETENTION_DAYS} ngày). Hãy gọi /convert lại.")
-    media = _AUDIO_TYPES.get(os.path.splitext(path)[1].lower(), "audio/mpeg")
-    return path, media
+    ext = os.path.splitext(path or conv.get("result_object") or "")[1].lower() or ".mp3"
+    media = _AUDIO_TYPES.get(ext, "audio/mpeg")
+    filename = (conv["song_name"] or f"conversion_{conv['id']}") + ext
+
+    # 1) File còn trên đĩa server
+    if path and os.path.exists(path):
+        if as_download:
+            return FileResponse(path, media_type=media, filename=filename)
+        return FileResponse(path, media_type=media)
+
+    # 2) Bản lưu trên MinIO (bucket kết quả)
+    obj_name = conv.get("result_object")
+    if obj_name:
+        try:
+            client = _get_minio()
+            obj = client.get_object(MINIO_RESULT_BUCKET, obj_name)
+        except Exception as e:
+            if "NoSuchKey" in str(e):
+                raise HTTPException(
+                    status_code=410,
+                    detail=f"File đã hết hạn lưu trên MinIO ({RESULT_RETENTION_DAYS} ngày). Hãy gọi /convert lại.")
+            raise HTTPException(status_code=502, detail=f"Không đọc được file từ MinIO: {e}")
+
+        def _iter():
+            try:
+                for chunk in obj.stream(1 << 20):
+                    yield chunk
+            finally:
+                obj.close()
+                obj.release_conn()
+
+        headers = {}
+        if as_download:
+            headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(filename)
+        return StreamingResponse(_iter(), media_type=media, headers=headers)
+
+    raise HTTPException(
+        status_code=410,
+        detail=f"File đã bị dọn (giữ tối đa {RESULT_RETENTION_DAYS} ngày). Hãy gọi /convert lại.")
 
 @app.get("/conversions/{customer_id}", dependencies=[Depends(verify_api_key)])
 def list_conversions(customer_id: str, limit: int = 50, offset: int = 0):
@@ -857,7 +901,8 @@ def list_conversions(customer_id: str, limit: int = 50, offset: int = 0):
             cur.execute(f"SELECT count(*) FROM {CONVERT_TABLE} WHERE customer_id = %s", (customer_id,))
             total = cur.fetchone()[0]
             cur.execute(
-                f"SELECT id, song_id, song_name, pitch_shift, result_path, file_size, created_at "
+                f"SELECT id, song_id, song_name, pitch_shift, result_path, result_object, "
+                f"file_size, created_at "
                 f"FROM {CONVERT_TABLE} WHERE customer_id = %s ORDER BY id DESC LIMIT %s OFFSET %s",
                 (customer_id, limit, offset))
             rows = cur.fetchall()
@@ -866,15 +911,17 @@ def list_conversions(customer_id: str, limit: int = 50, offset: int = 0):
 
     items = []
     for r in rows:
-        available = bool(r[4]) and os.path.exists(r[4])
+        on_disk = bool(r[4]) and os.path.exists(r[4])
         items.append({
             "conversion_id": r[0],
             "song_id": r[1],
             "song_name": r[2] or (os.path.basename(r[4]) if r[4] else None),
             "pitch_shift": r[3],
-            "size_mb": round(r[5] / 1048576, 2) if r[5] else None,
-            "created_at": str(r[6]),
-            "available": available,
+            "size_mb": round(r[6] / 1048576, 2) if r[6] else None,
+            "created_at": str(r[7]),
+            # còn nghe/tải được: file trên đĩa server hoặc bản lưu MinIO
+            "available": on_disk or bool(r[5]),
+            "storage": "local" if on_disk else ("minio" if r[5] else None),
             "stream_url": f"/conversions/{r[0]}/stream",
             "download_url": f"/conversions/{r[0]}/download",
         })
@@ -884,17 +931,12 @@ def list_conversions(customer_id: str, limit: int = 50, offset: int = 0):
 @app.get("/conversions/{conversion_id}/stream", dependencies=[Depends(_flex_api_key)])
 def stream_conversion(conversion_id: int):
     """Nghe thử bản convert — phát trực tiếp (inline), dùng được cho <audio src="...?api_key=KEY">."""
-    conv = _get_conversion(conversion_id)
-    path, media = _conversion_file(conv)
-    return FileResponse(path, media_type=media)
+    return _serve_conversion(_get_conversion(conversion_id), as_download=False)
 
 @app.get("/conversions/{conversion_id}/download", dependencies=[Depends(_flex_api_key)])
 def download_conversion(conversion_id: int):
     """Tải bản convert về (Content-Disposition: attachment, tên file = tên bài hát)."""
-    conv = _get_conversion(conversion_id)
-    path, media = _conversion_file(conv)
-    filename = (conv["song_name"] or f"conversion_{conversion_id}") + os.path.splitext(path)[1]
-    return FileResponse(path, media_type=media, filename=filename)
+    return _serve_conversion(_get_conversion(conversion_id), as_download=True)
 
 # =====================================================================================
 # UPLOAD FILE GHI ÂM CỦA KHÁCH HÀNG LÊN NAS 25 (MinIO)
@@ -916,6 +958,8 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "172.16.20.12:9100")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "customer-records")
+# Bucket riêng cho file KẾT QUẢ convert (khách nghe thử/tải) — tự xóa sau RESULT_RETENTION_DAYS
+MINIO_RESULT_BUCKET = os.environ.get("MINIO_RESULT_BUCKET", "converted-songs")
 MINIO_SECURE = os.environ.get("MINIO_SECURE", "0") == "1"
 
 _minio_client = None
@@ -941,6 +985,44 @@ def _get_minio():
 def _safe_name(value: str) -> str:
     """Giữ chữ/số/gạch để làm tên thư mục/file trên MinIO."""
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value)).strip("_") or "unknown"
+
+_result_bucket_ready = False
+
+def _get_minio_result():
+    """Client MinIO + đảm bảo bucket kết quả tồn tại, kèm lifecycle tự xóa sau RESULT_RETENTION_DAYS."""
+    global _result_bucket_ready
+    client = _get_minio()
+    if not _result_bucket_ready:
+        if not client.bucket_exists(MINIO_RESULT_BUCKET):
+            client.make_bucket(MINIO_RESULT_BUCKET)
+        try:
+            from minio.lifecycleconfig import LifecycleConfig, Rule, Expiration
+            from minio.commonconfig import Filter, ENABLED
+            client.set_bucket_lifecycle(MINIO_RESULT_BUCKET, LifecycleConfig([
+                Rule(ENABLED, rule_filter=Filter(prefix=""), rule_id="expire-results",
+                     expiration=Expiration(days=RESULT_RETENTION_DAYS)),
+            ]))
+        except Exception as e:
+            print(f"[MinIO] Không đặt được lifecycle cho {MINIO_RESULT_BUCKET} (object sẽ giữ vĩnh viễn): {e}")
+        _result_bucket_ready = True
+    return client
+
+def upload_result_to_minio(path, customer_id):
+    """Đẩy file kết quả convert lên MinIO, trả về object name (None nếu lỗi/chưa cấu hình).
+    Chạy trong worker thread nên mọi lỗi chỉ log, không làm task fail."""
+    try:
+        client = _get_minio_result()
+        object_name = "{}/{}/{}".format(
+            _safe_name(customer_id or "unknown"),
+            datetime.now().strftime("%Y-%m-%d"),
+            _safe_name(os.path.basename(path)),
+        )
+        client.fput_object(MINIO_RESULT_BUCKET, object_name, path, content_type="audio/mpeg")
+        print(f"[MinIO] Đã lưu kết quả convert: {MINIO_RESULT_BUCKET}/{object_name}")
+        return object_name
+    except Exception as e:
+        print(f"[MinIO] Lỗi upload kết quả {path}: {e}")
+        return None
 
 # Bảng lưu thông tin bản ghi âm đã upload (Postgres, cùng DB với đăng ký model)
 RECORD_TABLE = os.environ.get("RECORD_TABLE", "rvc_recorded_files")

@@ -363,9 +363,12 @@ file ghi âm.
 
 ## 10. Danh sách bài đã convert — nghe thử rồi tải
 
-Mỗi lần task `/convert` hoàn tất, kết quả được ghi vào bảng `rvc_converted_songs`.
-Bộ 3 endpoint này cho app hiển thị danh sách bản đã convert của khách, **phát nghe thử**
-rồi mới **tải về** — không phụ thuộc `task_id` (vốn mất khi server restart).
+Mỗi lần task `/convert` hoàn tất: kết quả được ghi vào bảng `rvc_converted_songs` **và
+đẩy lên MinIO** (bucket `converted-songs`, tự xóa theo lifecycle sau 90 ngày). Bộ 3 endpoint
+này cho app hiển thị danh sách bản đã convert của khách, **phát nghe thử** rồi mới **tải về**
+— không phụ thuộc `task_id` (vốn mất khi server restart). Khi phục vụ, server ưu tiên file
+local trong `audios/`, file local đã bị dọn thì tự stream từ MinIO — client không cần quan tâm
+file nằm đâu.
 
 ### `GET /conversions/{customer_id}` — Danh sách bản đã convert của khách
 
@@ -393,6 +396,7 @@ curl -H "X-API-Key: YOUR_API_KEY" \
       "size_mb": 4.5,
       "created_at": "2026-07-16 10:20:00",
       "available": true,
+      "storage": "local",
       "stream_url": "/conversions/2/stream",
       "download_url": "/conversions/2/download"
     },
@@ -403,7 +407,8 @@ curl -H "X-API-Key: YOUR_API_KEY" \
       "pitch_shift": 0,
       "size_mb": 5.1,
       "created_at": "2026-07-01 09:00:00",
-      "available": false,
+      "available": true,
+      "storage": "minio",
       "stream_url": "/conversions/1/stream",
       "download_url": "/conversions/1/download"
     }
@@ -411,7 +416,8 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 }
 ```
 
-`available: false` = file kết quả đã bị dọn (giữ tối đa **90 ngày / 3 tháng**) — gọi `/convert` lại nếu khách muốn nghe.
+- `storage`: `"local"` (còn trên đĩa server) hoặc `"minio"` (đã dọn local, phục vụ từ MinIO) — chỉ mang tính thông tin, cách gọi stream/download y hệt nhau.
+- `available: false` = cả hai nơi đều hết (quá **90 ngày / 3 tháng**) — gọi `/convert` lại nếu khách muốn nghe.
 
 ### `GET /conversions/{id}/stream` — Nghe thử (phát trực tiếp)
 
@@ -551,6 +557,6 @@ echo "Xong: ket_qua.mp3"
 
 - **`pitch_shift`** (nửa cung): cùng giới tính `0`; model nam hát bài ca sĩ nữ `-12`; model nữ hát bài ca sĩ nam `+12`; lệch nhẹ thử `±3..6`.
 - **Model theo khách được giữ vĩnh viễn** (`assets/weights/` + DB) — convert các lần sau không cần train lại.
-- File upload input tự xóa sau khi task xong; file **kết quả convert** trong `audios/` giữ **90 ngày (3 tháng)** rồi tự xóa (đổi bằng biến `RESULT_RETENTION_DAYS`); file trung gian (tách beat/vocal...) dọn sau **10 ngày** (`RETENTION_DAYS`).
+- File upload input tự xóa sau khi task xong; file **kết quả convert** lưu ở 2 nơi: `audios/` trên server và MinIO bucket `converted-songs` (`MINIO_RESULT_BUCKET`) — cả hai giữ **90 ngày (3 tháng)**, đổi bằng biến `RESULT_RETENTION_DAYS` (MinIO xóa theo bucket lifecycle); file trung gian (tách beat/vocal...) dọn sau **10 ngày** (`RETENTION_DAYS`).
 - Server xử lý tuần tự — nhiều request cùng lúc sẽ xếp hàng (xem `queue_size` trong response).
 - Task registry nằm trong RAM: restart server làm mất `task_id` đang theo dõi (model/kết quả trên đĩa không mất).
