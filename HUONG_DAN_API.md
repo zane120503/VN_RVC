@@ -265,8 +265,11 @@ curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?limit
 }
 ```
 
-Với `available=true`, mỗi bài trả về có thêm `size_mb`; `count` có thể nhỏ hơn `limit`
-(các bài chưa sync trong trang bị loại) — cứ phân trang bằng `offset` như bình thường.
+Với `available=true`: server tự quét từ bài mới → cũ, **bỏ qua các bài chưa sync** và gom
+cho đủ `limit` bài convert được (bài mới nhất thường chưa sync nên không lo trang đầu rỗng).
+`offset` tính trên danh sách bài convert được; mỗi bài kèm `size_mb`; trường `scanned` cho
+biết đã quét bao nhiêu dòng. Lần gọi đầu có thể mất vài giây, các lần sau nhanh nhờ cache
+kết quả kiểm tra 10 phút (`SONG_CHECK_CACHE_SEC`).
 
 > ⚠️ Không dùng `available=true` thì danh sách có thể lẫn bài thuộc build **mới nhất** chưa
 > đồng bộ lên media server — khi đó xác nhận từng bài bằng `/check_song/{id}` trước khi `/convert`.

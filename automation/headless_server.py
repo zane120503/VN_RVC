@@ -780,6 +780,22 @@ def _check_song_available(song):
     except Exception:
         return None
 
+# Cache kết quả kiểm tra theo song_id để các lần gọi /songs?available=true sau nhanh
+# (media server sync theo đợt nên kết quả ít thay đổi trong vài phút)
+_SONG_AVAIL_CACHE = {}
+SONG_CHECK_CACHE_SEC = int(os.environ.get("SONG_CHECK_CACHE_SEC", "600"))
+
+def _check_song_available_cached(song):
+    hit = _SONG_AVAIL_CACHE.get(song["id"])
+    if hit and hit[0] > time.time():
+        if hit[1] is None:
+            return None
+        return {**song, "size_mb": hit[1]}
+    res = _check_song_available(song)
+    _SONG_AVAIL_CACHE[song["id"]] = (time.time() + SONG_CHECK_CACHE_SEC,
+                                     res["size_mb"] if res else None)
+    return res
+
 @app.get("/songs", dependencies=[Depends(verify_api_key)])
 def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0, available: bool = False):
     """Danh sách bài hát (từ bảng ktv_song, chỉ các bài có media file_path).
@@ -810,24 +826,49 @@ def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0, availa
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(f"SELECT count(*) FROM ktv_song WHERE {where}", params)
             total = cur.fetchone()[0]
-            cur.execute(
-                f"SELECT id, name, duration, version FROM ktv_song WHERE {where} "
-                f"ORDER BY id DESC LIMIT %s OFFSET %s", params + [limit, offset])
-            songs = [
-                {"id": r[0], "name": r[1], "duration": r[2], "version": r[3]}
-                for r in cur.fetchall()
-            ]
+
+            if not available:
+                cur.execute(
+                    f"SELECT id, name, duration, version FROM ktv_song WHERE {where} "
+                    f"ORDER BY id DESC LIMIT %s OFFSET %s", params + [limit, offset])
+                songs = [
+                    {"id": r[0], "name": r[1], "duration": r[2], "version": r[3]}
+                    for r in cur.fetchall()
+                ]
+                return {"total": total, "limit": limit, "offset": offset, "count": len(songs),
+                        "available_only": False, "songs": songs}
+
+            # available=true: bài mới nhất thường CHƯA sync lên media server, nên phải
+            # quét từng đợt từ mới -> cũ, kiểm tra thật (song song) và gom cho đủ `limit`.
+            from concurrent.futures import ThreadPoolExecutor
+            BATCH = 200
+            MAX_SCAN = int(os.environ.get("SONGS_SCAN_LIMIT", "3000"))  # chặn trên để không quét cả DB
+            songs, skipped, db_offset, scanned = [], 0, 0, 0
+            with ThreadPoolExecutor(max_workers=20) as ex:
+                while len(songs) < limit and db_offset < MAX_SCAN:
+                    cur.execute(
+                        f"SELECT id, name, duration, version FROM ktv_song WHERE {where} "
+                        f"ORDER BY id DESC LIMIT %s OFFSET %s", params + [BATCH, db_offset])
+                    rows = [{"id": r[0], "name": r[1], "duration": r[2], "version": r[3]}
+                            for r in cur.fetchall()]
+                    if not rows:
+                        break
+                    scanned += len(rows)
+                    # ex.map giữ nguyên thứ tự -> phân trang ổn định
+                    for s in ex.map(_check_song_available_cached, rows):
+                        if s is None:
+                            continue
+                        if skipped < offset:   # offset tính trên danh sách BÀI CONVERT ĐƯỢC
+                            skipped += 1
+                            continue
+                        if len(songs) < limit:
+                            songs.append(s)
+                    db_offset += BATCH
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
 
-    if available and songs:
-        # Kiểm tra thật trên media server, chạy song song cho cả trang
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            songs = [s for s in ex.map(_check_song_available, songs) if s]
-
     return {"total": total, "limit": limit, "offset": offset, "count": len(songs),
-            "available_only": available, "songs": songs}
+            "available_only": True, "scanned": scanned, "songs": songs}
 
 @app.get("/check_song/{song_id}", dependencies=[Depends(verify_api_key)])
 def check_song(song_id: str):
