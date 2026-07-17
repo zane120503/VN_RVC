@@ -87,6 +87,11 @@ curl -X POST https://idolvoice.karaokeicool.vn/train \
 }
 ```
 
+**Lưu trữ model:** train xong, model (`.pth` + `.index`) được lưu trên đĩa server **và đẩy lên
+MinIO** (bucket `customer-models`, giữ vĩnh viễn). `force_retrain=true` sẽ **xóa model cũ ở cả
+hai nơi** rồi thay bằng model mới. Nếu server bị rebuild/mất đĩa, `/convert` tự tải model từ
+MinIO về — không phải train lại.
+
 **⚠️ Yêu cầu dữ liệu train:**
 - Tổng thời lượng **giọng nói thực tế** (đã trừ khoảng lặng) tối thiểu **60 giây** — ít hơn task sẽ `failed` với thông báo trong `logs`.
 - Nên gửi 10–30 phút ghi âm, rõ, ít tạp âm để chất lượng tốt.
@@ -106,6 +111,7 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 {
   "customer_id": "KH001",
   "trained": true,
+  "storage": "local",
   "model_name": "cus_KH001",
   "model_file": "cus_KH001_150e_....pth",
   "index_file": "added_IVF..._cus_KH001_v2.index",
@@ -121,7 +127,8 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 }
 ```
 
-`trained: false` → cần gọi `/train` trước khi `/convert`.
+- `trained: false` → cần gọi `/train` trước khi `/convert`.
+- `storage`: `"local"` (model trên đĩa server) hoặc `"minio"` (chỉ còn bản trên MinIO — `/convert` sẽ tự tải về, không cần train lại).
 
 ---
 
@@ -556,7 +563,7 @@ echo "Xong: ket_qua.mp3"
 ## 📝 Ghi chú vận hành
 
 - **`pitch_shift`** (nửa cung): cùng giới tính `0`; model nam hát bài ca sĩ nữ `-12`; model nữ hát bài ca sĩ nam `+12`; lệch nhẹ thử `±3..6`.
-- **Model theo khách được giữ vĩnh viễn** (`assets/weights/` + DB) — convert các lần sau không cần train lại.
+- **Model theo khách được giữ vĩnh viễn** ở 2 nơi: `assets/weights/` trên server + MinIO bucket `customer-models` (`MINIO_MODEL_BUCKET`) — convert các lần sau không cần train lại; server rebuild cũng tự khôi phục model từ MinIO. Train lại (`force_retrain=true`) thay model mới ở cả hai nơi.
 - File upload input tự xóa sau khi task xong; file **kết quả convert** lưu ở 2 nơi: `audios/` trên server và MinIO bucket `converted-songs` (`MINIO_RESULT_BUCKET`) — cả hai giữ **90 ngày (3 tháng)**, đổi bằng biến `RESULT_RETENTION_DAYS` (MinIO xóa theo bucket lifecycle); file trung gian (tách beat/vocal...) dọn sau **10 ngày** (`RETENTION_DAYS`).
 - Server xử lý tuần tự — nhiều request cùng lúc sẽ xếp hàng (xem `queue_size` trong response).
 - Task registry nằm trong RAM: restart server làm mất `task_id` đang theo dõi (model/kết quả trên đĩa không mất).

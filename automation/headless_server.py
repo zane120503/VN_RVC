@@ -106,28 +106,36 @@ def init_model_table():
                     trained_at  TIMESTAMP DEFAULT NOW(),
                     updated_at  TIMESTAMP DEFAULT NOW()
                 )""")
+            # Bản cũ chưa có cột object trên MinIO -> bổ sung
+            cur.execute(f"ALTER TABLE {MODEL_TABLE} ADD COLUMN IF NOT EXISTS model_object VARCHAR")
+            cur.execute(f"ALTER TABLE {MODEL_TABLE} ADD COLUMN IF NOT EXISTS index_object VARCHAR")
         print(f"DB model registry sẵn sàng (bảng {MODEL_TABLE}).")
     except Exception as e:
         print(f"⚠️  Không khởi tạo được bảng model: {e}")
 
-def save_customer_model(customer_id, model_name, model_file, index_file, epochs):
+def save_customer_model(customer_id, model_name, model_file, index_file, epochs,
+                        model_object=None, index_object=None):
     """Upsert bản ghi model của khách hàng sau khi train xong."""
     if not _db_enabled():
         return
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(f"""
-                INSERT INTO {MODEL_TABLE} (customer_id, model_name, model_file, index_file, epochs, trained_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                INSERT INTO {MODEL_TABLE} (customer_id, model_name, model_file, index_file, epochs,
+                                           model_object, index_object, trained_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (customer_id) DO UPDATE SET
-                    model_name = EXCLUDED.model_name,
-                    model_file = EXCLUDED.model_file,
-                    index_file = EXCLUDED.index_file,
-                    epochs     = EXCLUDED.epochs,
-                    trained_at = NOW(),
-                    updated_at = NOW()
-                """, (customer_id, model_name, model_file, index_file, epochs))
-        print(f"[DB] Đã lưu model của khách {customer_id}: {model_file}")
+                    model_name   = EXCLUDED.model_name,
+                    model_file   = EXCLUDED.model_file,
+                    index_file   = EXCLUDED.index_file,
+                    epochs       = EXCLUDED.epochs,
+                    model_object = EXCLUDED.model_object,
+                    index_object = EXCLUDED.index_object,
+                    trained_at   = NOW(),
+                    updated_at   = NOW()
+                """, (customer_id, model_name, model_file, index_file, epochs,
+                      model_object, index_object))
+        print(f"[DB] Đã lưu model của khách {customer_id}: {model_file} (minio: {model_object})")
     except Exception as e:
         print(f"[DB] Lỗi lưu model khách {customer_id}: {e}")
 
@@ -137,7 +145,8 @@ def get_customer_model(customer_id):
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"SELECT customer_id, model_name, model_file, index_file, epochs, trained_at, updated_at "
+                f"SELECT customer_id, model_name, model_file, index_file, epochs, trained_at, updated_at, "
+                f"model_object, index_object "
                 f"FROM {MODEL_TABLE} WHERE customer_id = %s", (customer_id,))
             row = cur.fetchone()
             if not row:
@@ -146,6 +155,7 @@ def get_customer_model(customer_id):
                 "customer_id": row[0], "model_name": row[1], "model_file": row[2],
                 "index_file": row[3], "epochs": row[4],
                 "trained_at": str(row[5]), "updated_at": str(row[6]),
+                "model_object": row[7], "index_object": row[8],
             }
     except Exception as e:
         print(f"[DB] Lỗi đọc model khách {customer_id}: {e}")
@@ -279,14 +289,17 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
             TASKS[task_id]["result_path"] = final_output
             TASKS[task_id]["message"] = "Success"
 
-            # Train xong -> lưu đăng ký model theo khách hàng vào DB
+            # Train xong -> đẩy model lên MinIO (xóa bản cũ) + lưu đăng ký vào DB
             if kind == "train" and payload.get("customer_id"):
+                model_object, index_object = upload_model_to_minio(payload["model_name"])
                 save_customer_model(
                     customer_id=payload["customer_id"],
                     model_name=payload["model_name"],
                     model_file=os.path.basename(final_output),
                     index_file=os.path.basename(_pick_index_file(payload["model_name"]) or "") or None,
                     epochs=payload.get("epochs"),
+                    model_object=model_object,
+                    index_object=index_object,
                 )
 
             # Convert xong -> đẩy kết quả lên MinIO + lưu vào danh sách để khách nghe thử rồi tải
@@ -598,7 +611,12 @@ async def train_customer_model(
     """
     model_name = _model_name_for(customer_id)
 
+    # Đã có model? — trên đĩa server hoặc bản lưu MinIO (server rebuild vẫn không train lại oan)
     existing = _pick_latest_model_file(model_name)
+    if not existing:
+        db_rec = get_customer_model(customer_id)
+        if db_rec and db_rec.get("model_object"):
+            existing = os.path.basename(db_rec["model_object"])
     if existing and not force_retrain:
         return {
             "status": "exists",
@@ -653,17 +671,20 @@ async def train_customer_model(
 
 @app.get("/model/{customer_id}", dependencies=[Depends(verify_api_key)])
 def customer_model_info(customer_id: str):
-    """Kiểm tra khách hàng đã có model train sẵn chưa."""
+    """Kiểm tra khách hàng đã có model train sẵn chưa (trên đĩa server hoặc MinIO)."""
     model_name = _model_name_for(customer_id)
     model_file = _pick_latest_model_file(model_name)
     index_file = _pick_index_file(model_name)
+    db_record = get_customer_model(customer_id)
+    on_minio = bool(db_record and db_record.get("model_object"))
     return {
         "customer_id": customer_id,
-        "trained": bool(model_file),
+        "trained": bool(model_file) or on_minio,
+        "storage": "local" if model_file else ("minio" if on_minio else None),
         "model_name": model_name,
-        "model_file": model_file,
+        "model_file": model_file or (os.path.basename(db_record["model_object"]) if on_minio else None),
         "index_file": os.path.basename(index_file) if index_file else None,
-        "db_record": get_customer_model(customer_id),
+        "db_record": db_record,
     }
 
 @app.post("/convert", dependencies=[Depends(verify_api_key)])
@@ -679,7 +700,8 @@ async def convert_with_customer_model(
     """
     model_name = _model_name_for(customer_id)
 
-    if not _pick_latest_model_file(model_name):
+    # Model không có trên đĩa (vd server mới rebuild) -> tự khôi phục từ MinIO
+    if not restore_model_from_minio(model_name):
         raise HTTPException(
             status_code=404,
             detail=f"Khách hàng {customer_id} chưa có model. Hãy gọi /train trước.",
@@ -960,6 +982,8 @@ MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "customer-records")
 # Bucket riêng cho file KẾT QUẢ convert (khách nghe thử/tải) — tự xóa sau RESULT_RETENTION_DAYS
 MINIO_RESULT_BUCKET = os.environ.get("MINIO_RESULT_BUCKET", "converted-songs")
+# Bucket riêng cho MODEL đã train theo khách — giữ vĩnh viễn, train lại thì thay bản mới
+MINIO_MODEL_BUCKET = os.environ.get("MINIO_MODEL_BUCKET", "customer-models")
 MINIO_SECURE = os.environ.get("MINIO_SECURE", "0") == "1"
 
 _minio_client = None
@@ -1023,6 +1047,82 @@ def upload_result_to_minio(path, customer_id):
     except Exception as e:
         print(f"[MinIO] Lỗi upload kết quả {path}: {e}")
         return None
+
+# ------------------------- MODEL TRÊN MINIO (bucket customer-models) -------------------------
+from main.app.variables import configs as _rvc_configs
+
+def _weights_dir():
+    return _rvc_configs.get("weights_path", os.path.join("assets", "weights"))
+
+def _model_logs_dir(model_name):
+    return os.path.join(_rvc_configs.get("logs_path", os.path.join("assets", "logs")), model_name)
+
+_model_bucket_ready = False
+
+def _get_minio_model():
+    """Client MinIO + đảm bảo bucket model tồn tại (KHÔNG đặt lifecycle — model giữ vĩnh viễn)."""
+    global _model_bucket_ready
+    client = _get_minio()
+    if not _model_bucket_ready:
+        if not client.bucket_exists(MINIO_MODEL_BUCKET):
+            client.make_bucket(MINIO_MODEL_BUCKET)
+        _model_bucket_ready = True
+    return client
+
+def upload_model_to_minio(model_name):
+    """Đẩy model vừa train (.pth + .index) lên MinIO dưới prefix {model_name}/.
+
+    Xóa toàn bộ object cũ của model trước khi upload -> train lại là thay hẳn bản mới.
+    Trả về (model_object, index_object); lỗi chỉ log (model vẫn còn trên đĩa server)."""
+    try:
+        client = _get_minio_model()
+
+        # Xóa bản cũ trên MinIO
+        for obj in client.list_objects(MINIO_MODEL_BUCKET, prefix=f"{model_name}/", recursive=True):
+            client.remove_object(MINIO_MODEL_BUCKET, obj.object_name)
+
+        model_object = index_object = None
+        pth = _pick_latest_model_file(model_name)
+        if pth:
+            model_object = f"{model_name}/{pth}"
+            client.fput_object(MINIO_MODEL_BUCKET, model_object,
+                               os.path.join(_weights_dir(), pth))
+        idx = _pick_index_file(model_name)
+        if idx:
+            index_object = f"{model_name}/{os.path.basename(idx)}"
+            client.fput_object(MINIO_MODEL_BUCKET, index_object, idx)
+
+        print(f"[MinIO] Đã lưu model {model_name}: {model_object} + {index_object}")
+        return model_object, index_object
+    except Exception as e:
+        print(f"[MinIO] Lỗi upload model {model_name}: {e}")
+        return None, None
+
+def restore_model_from_minio(model_name):
+    """Tải model từ MinIO về đúng vị trí trên đĩa (weights/ + logs/) nếu local không có.
+
+    Trả True khi model sẵn sàng dùng (đã có sẵn local hoặc khôi phục thành công)."""
+    if _pick_latest_model_file(model_name):
+        return True
+    try:
+        client = _get_minio_model()
+        got_pth = False
+        for obj in client.list_objects(MINIO_MODEL_BUCKET, prefix=f"{model_name}/", recursive=True):
+            base = os.path.basename(obj.object_name)
+            if base.endswith(".pth"):
+                dest = os.path.join(_weights_dir(), base)
+                got_pth = True
+            elif base.endswith(".index"):
+                dest = os.path.join(_model_logs_dir(model_name), base)
+            else:
+                continue
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            client.fget_object(MINIO_MODEL_BUCKET, obj.object_name, dest)
+            print(f"[MinIO] Khôi phục model: {obj.object_name} -> {dest}")
+        return got_pth
+    except Exception as e:
+        print(f"[MinIO] Lỗi khôi phục model {model_name}: {e}")
+        return False
 
 # Bảng lưu thông tin bản ghi âm đã upload (Postgres, cùng DB với đăng ký model)
 RECORD_TABLE = os.environ.get("RECORD_TABLE", "rvc_recorded_files")
