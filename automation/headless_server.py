@@ -328,6 +328,10 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
         TASKS[task_id]["logs"] += f"\n\nERROR:\n{err_trace}"
 
     finally:
+        # Model trên đĩa chỉ là cache: làm mới hạn (MODEL_CACHE_DAYS tính từ LẦN DÙNG CUỐI)
+        if kind == "convert" and payload.get("model_name"):
+            _touch_model(payload["model_name"])
+
         # Dọn file input đã upload để không đầy đĩa (chỉ áp dụng task từ /run_upload).
         # File kết quả nằm ở audios/ nên xóa thư mục upload không ảnh hưởng.
         # Tắt cơ chế này bằng biến môi trường CLEANUP_UPLOADS=0.
@@ -377,6 +381,7 @@ def janitor_loop():
     while True:
         try:
             cleanup_old_files()
+            cleanup_model_cache()
         except Exception as e:
             print(f"[Janitor] Lỗi vòng lặp: {e}")
         time.sleep(JANITOR_INTERVAL_SEC)
@@ -1097,6 +1102,64 @@ def upload_model_to_minio(model_name):
     except Exception as e:
         print(f"[MinIO] Lỗi upload model {model_name}: {e}")
         return None, None
+
+# Bản model trên đĩa server chỉ là CACHE: quá N ngày không dùng thì janitor xóa
+# (bản chính trên MinIO, cần lại sẽ tự tải về). Đặt 0 để giữ vĩnh viễn trên server.
+MODEL_CACHE_DAYS = float(os.environ.get("MODEL_CACHE_DAYS", "1"))
+
+def _model_on_minio(model_name):
+    """Model có bản lưu trên MinIO không (điều kiện an toàn trước khi xóa bản local)."""
+    try:
+        client = _get_minio_model()
+        for _ in client.list_objects(MINIO_MODEL_BUCKET, prefix=f"{model_name}/", recursive=True):
+            return True
+        return False
+    except Exception:
+        return False
+
+def remove_model_from_server(model_name):
+    """Xóa model khỏi đĩa server (.pth trong weights/ + thư mục logs/) — bản chính trên MinIO."""
+    try:
+        wd = _weights_dir()
+        if os.path.isdir(wd):
+            for f in os.listdir(wd):
+                if f.startswith(model_name) and f.endswith(".pth"):
+                    os.remove(os.path.join(wd, f))
+        shutil.rmtree(_model_logs_dir(model_name), ignore_errors=True)
+        print(f"[Model] Đã xóa cache model {model_name} trên đĩa server (bản chính trên MinIO).")
+    except Exception as e:
+        print(f"[Model] Lỗi xóa cache model {model_name}: {e}")
+
+def _touch_model(model_name):
+    """Làm mới mtime của model -> hạn cache tính từ LẦN DÙNG CUỐI."""
+    try:
+        wd = _weights_dir()
+        for f in os.listdir(wd):
+            if f.startswith(model_name) and f.endswith(".pth"):
+                os.utime(os.path.join(wd, f), None)
+    except Exception:
+        pass
+
+def cleanup_model_cache():
+    """Janitor: xóa model cus_* trên đĩa server không dùng quá MODEL_CACHE_DAYS ngày.
+    Chỉ xóa khi MinIO chắc chắn còn bản lưu."""
+    wd = _weights_dir()
+    if MODEL_CACHE_DAYS <= 0 or not os.path.isdir(wd):
+        return
+    cutoff = time.time() - MODEL_CACHE_DAYS * 86400
+    for f in os.listdir(wd):
+        if not (f.startswith("cus_") and f.endswith(".pth")):
+            continue  # chỉ quản lý model tạo qua API (/train), không đụng model khác
+        try:
+            if os.path.getmtime(os.path.join(wd, f)) >= cutoff:
+                continue
+        except OSError:
+            continue
+        model_name = re.sub(r"_\d+e(_\d+s)?\.pth$", "", f)
+        if _model_on_minio(model_name):
+            remove_model_from_server(model_name)
+        else:
+            print(f"[Janitor] Giữ lại {f}: MinIO chưa có bản lưu (không xóa để tránh mất model).")
 
 def restore_model_from_minio(model_name):
     """Tải model từ MinIO về đúng vị trí trên đĩa (weights/ + logs/) nếu local không có.

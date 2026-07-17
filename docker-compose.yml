@@ -37,6 +37,8 @@ services:
       - MINIO_RESULT_BUCKET=${MINIO_RESULT_BUCKET:-converted-songs}
       # Bucket lưu MODEL đã train theo khách (giữ vĩnh viễn, train lại thì thay bản mới)
       - MINIO_MODEL_BUCKET=${MINIO_MODEL_BUCKET:-customer-models}
+      # Model trên đĩa server chỉ là cache: quá N ngày không dùng thì xóa (0 = giữ vĩnh viễn)
+      - MODEL_CACHE_DAYS=${MODEL_CACHE_DAYS:-1}
       - MINIO_SECURE=${MINIO_SECURE:-0}
       # Bảng Postgres lưu thông tin bản ghi âm đã upload
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
