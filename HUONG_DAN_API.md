@@ -235,16 +235,20 @@ Trả về danh sách bài hát trong hệ thống (chỉ các bài có media), 
 | `q` | text | — | Từ khóa tìm theo tên bài (**có dấu hoặc không dấu** đều được) |
 | `limit` | int | 50 | Số bài mỗi trang (tối đa 200) |
 | `offset` | int | 0 | Vị trí bắt đầu (phân trang) |
+| `available` | bool | false | `true` = **chỉ trả về bài convert được thật** (đã xuất bản + có file audio trên media server, kèm `size_mb`) |
 
 ```bash
 # 50 bài mới nhất
 curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs"
 
-# Tìm bài theo tên (không dấu cũng được)
-curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?q=hen%20yeu&limit=20"
+# CHỈ các bài convert được (cho khách chọn) — khuyên dùng cho app
+curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?available=true&limit=50"
+
+# Tìm bài theo tên (không dấu cũng được), chỉ lấy bài convert được
+curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?q=hen%20yeu&available=true"
 
 # Trang tiếp theo
-curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?limit=50&offset=50"
+curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?limit=50&offset=50&available=true"
 ```
 
 **Response `200`:**
@@ -261,7 +265,11 @@ curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/songs?limit
 }
 ```
 
-> ⚠️ Bài thuộc build **mới nhất** có thể chưa đồng bộ lên media server. Trước khi `/convert`, nên xác nhận bằng `/check_song/{id}`.
+Với `available=true`, mỗi bài trả về có thêm `size_mb`; `count` có thể nhỏ hơn `limit`
+(các bài chưa sync trong trang bị loại) — cứ phân trang bằng `offset` như bình thường.
+
+> ⚠️ Không dùng `available=true` thì danh sách có thể lẫn bài thuộc build **mới nhất** chưa
+> đồng bộ lên media server — khi đó xác nhận từng bài bằng `/check_song/{id}` trước khi `/convert`.
 
 ---
 

@@ -761,14 +761,35 @@ async def convert_with_customer_model(
 # DANH SÁCH BÀI HÁT + KIỂM TRA BÀI CÓ SẴN
 # =====================================================================================
 
+def _check_song_available(song):
+    """Kiểm tra 1 bài có file audio thật trên media server không (dùng cho available=true).
+    Trả về song (kèm size_mb) nếu convert được, None nếu không."""
+    try:
+        r = requests.get(STREAM_INFO_URL, params={"id": song["id"], "sourceType": "LOCAL"}, timeout=8)
+        r.raise_for_status()
+        video_url = r.json().get("video") or ""
+        if not video_url or "/media/v/0/" in video_url:
+            return None
+        audio_url = video_url.rsplit("/", 1)[0] + "/" + TARGET_AUDIO_FILENAME
+        h = requests.head(audio_url, timeout=8)
+        if h.status_code != 200:
+            return None
+        size = h.headers.get("Content-Length")
+        song["size_mb"] = round(int(size) / 1048576, 1) if size else None
+        return song
+    except Exception:
+        return None
+
 @app.get("/songs", dependencies=[Depends(verify_api_key)])
-def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0):
+def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0, available: bool = False):
     """Danh sách bài hát (từ bảng ktv_song, chỉ các bài có media file_path).
 
     - q: từ khóa tìm theo tên (có dấu hoặc không dấu đều được)
     - limit/offset: phân trang (limit tối đa 200)
-    Lưu ý: bài thuộc build mới nhất có thể chưa đồng bộ lên media server —
-    dùng GET /check_song/{id} để xác nhận trước khi convert.
+    - available=true: CHỈ trả về bài convert được thật — lọc bài chưa xuất bản (version 0)
+      và kiểm tra file audio tồn tại trên media server. Chậm hơn một chút (kiểm tra
+      song song từng bài của trang hiện tại); count có thể nhỏ hơn limit.
+    Không dùng available thì có thể xác nhận từng bài bằng GET /check_song/{id}.
     """
     if not _db_enabled():
         raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
@@ -781,6 +802,9 @@ def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0):
     if q:
         where += " AND (name ILIKE %s OR normalized_name ILIKE %s)"
         params += [f"%{q}%", f"%{q}%"]
+    if available:
+        # bài version 0 chắc chắn chưa đồng bộ lên media server -> loại ngay từ SQL
+        where += " AND version IS NOT NULL AND version <> 0"
 
     try:
         with _db_conn() as conn, conn.cursor() as cur:
@@ -796,7 +820,14 @@ def list_songs(q: Optional[str] = None, limit: int = 50, offset: int = 0):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
 
-    return {"total": total, "limit": limit, "offset": offset, "count": len(songs), "songs": songs}
+    if available and songs:
+        # Kiểm tra thật trên media server, chạy song song cho cả trang
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            songs = [s for s in ex.map(_check_song_available, songs) if s]
+
+    return {"total": total, "limit": limit, "offset": offset, "count": len(songs),
+            "available_only": available, "songs": songs}
 
 @app.get("/check_song/{song_id}", dependencies=[Depends(verify_api_key)])
 def check_song(song_id: str):
