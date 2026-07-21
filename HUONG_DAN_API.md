@@ -364,6 +364,22 @@ curl -X POST https://idolvoice.karaokeicool.vn/api/files/upload/audio \
 khi app khởi động** (bản ghi quá 1 tuần sẽ bị bỏ). Vì vậy server lỗi tạm thời không làm mất
 file ghi âm.
 
+**Nghe lại / tải bản ghi đã upload:** dùng `record_id` trong response:
+
+```html
+<audio controls src="https://idolvoice.karaokeicool.vn/records/12/stream?api_key=YOUR_API_KEY"></audio>
+```
+
+```bash
+# nghe (stream inline)
+curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/records/12/stream" -o nghe.mp3
+# tải về (attachment)
+curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/records/12/download" -O -J
+```
+
+Hai endpoint này nhận key qua header `X-API-Key` **hoặc** query `?api_key=` (cho thẻ `<audio>`).
+Server tự stream file từ MinIO — client không cần truy cập trực tiếp NAS.
+
 **Cấu hình server (biến môi trường / `.env`):**
 
 | Biến | Mặc định | Ý nghĩa |
@@ -505,11 +521,13 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 7 | GET | `/songs` | Danh sách / tìm kiếm bài hát | ✅ |
 | 8 | GET | `/check_song/{song_id}` | Kiểm tra bài có sẵn để convert | ✅ |
 | 9 | POST | `/api/files/upload/audio` | Upload file ghi âm lên NAS 25 (MinIO) + lưu DB | ❌ |
-| 10 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
-| 11 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
-| 12 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
-| 13 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
-| 14 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
+| 10 | GET | `/records/{record_id}/stream` | Nghe bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
+| 11 | GET | `/records/{record_id}/download` | Tải bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
+| 12 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
+| 13 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
+| 14 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
+| 15 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
+| 16 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 
 ---
 

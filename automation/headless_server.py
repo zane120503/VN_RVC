@@ -1408,6 +1408,62 @@ async def upload_audio(
         "created_time": created_time,
     }
 
+# =====================================================================================
+# NGHE LẠI / TẢI BẢN GHI ÂM ĐÃ UPLOAD (stream từ bucket customer-records)
+# =====================================================================================
+
+def _get_record(record_id: int):
+    if not _db_enabled():
+        raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, name, singer_name, bucket, audio_object FROM {RECORD_TABLE} WHERE id = %s",
+                (record_id,))
+            row = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
+    if not row:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi âm.")
+    return {"id": row[0], "name": row[1], "singer_name": row[2],
+            "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4]}
+
+def _stream_record(rec, as_download):
+    obj_name = rec["audio_object"]
+    ext = os.path.splitext(obj_name or "")[1].lower() or ".mp3"
+    media = _AUDIO_TYPES.get(ext, "audio/mpeg")
+    filename = (rec["name"] or f"record_{rec['id']}") + ext
+    try:
+        client = _get_minio()
+        obj = client.get_object(rec["bucket"], obj_name)
+    except Exception as e:
+        if "NoSuchKey" in str(e):
+            raise HTTPException(status_code=410, detail="File không còn trên MinIO.")
+        raise HTTPException(status_code=502, detail=f"Không đọc được file từ MinIO: {e}")
+
+    def _iter():
+        try:
+            for chunk in obj.stream(1 << 20):
+                yield chunk
+        finally:
+            obj.close()
+            obj.release_conn()
+
+    headers = {}
+    if as_download:
+        headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(filename)
+    return StreamingResponse(_iter(), media_type=media, headers=headers)
+
+@app.get("/records/{record_id}/stream", dependencies=[Depends(_flex_api_key)])
+def stream_record(record_id: int):
+    """Nghe bản ghi âm đã upload — nhận key qua header hoặc ?api_key= (gắn được vào <audio src>)."""
+    return _stream_record(_get_record(record_id), as_download=False)
+
+@app.get("/records/{record_id}/download", dependencies=[Depends(_flex_api_key)])
+def download_record(record_id: int):
+    """Tải bản ghi âm đã upload về (attachment)."""
+    return _stream_record(_get_record(record_id), as_download=True)
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "mode": "headless-async", "active_tasks": len(TASKS)}
