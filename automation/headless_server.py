@@ -1418,7 +1418,8 @@ def _get_record(record_id: int):
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, name, singer_name, bucket, audio_object FROM {RECORD_TABLE} WHERE id = %s",
+                f"SELECT id, name, singer_name, bucket, audio_object, image_object "
+                f"FROM {RECORD_TABLE} WHERE id = %s",
                 (record_id,))
             row = cur.fetchone()
     except Exception as e:
@@ -1426,7 +1427,7 @@ def _get_record(record_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi âm.")
     return {"id": row[0], "name": row[1], "singer_name": row[2],
-            "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4]}
+            "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4], "image_object": row[5]}
 
 def _stream_record(rec, as_download):
     obj_name = rec["audio_object"]
@@ -1463,6 +1464,35 @@ def stream_record(record_id: int):
 def download_record(record_id: int):
     """Tải bản ghi âm đã upload về (attachment)."""
     return _stream_record(_get_record(record_id), as_download=True)
+
+_IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                ".gif": "image/gif", ".webp": "image/webp"}
+
+@app.get("/records/{record_id}/image", dependencies=[Depends(_flex_api_key)])
+def record_image(record_id: int):
+    """Ảnh bìa của bản ghi âm — gắn được vào <img src="...?api_key=KEY">."""
+    rec = _get_record(record_id)
+    obj_name = rec.get("image_object")
+    if not obj_name:
+        raise HTTPException(status_code=404, detail="Bản ghi này không có ảnh bìa.")
+    media = _IMAGE_TYPES.get(os.path.splitext(obj_name)[1].lower(), "image/jpeg")
+    try:
+        client = _get_minio()
+        obj = client.get_object(rec["bucket"], obj_name)
+    except Exception as e:
+        if "NoSuchKey" in str(e):
+            raise HTTPException(status_code=410, detail="Ảnh không còn trên MinIO.")
+        raise HTTPException(status_code=502, detail=f"Không đọc được ảnh từ MinIO: {e}")
+
+    def _iter():
+        try:
+            for chunk in obj.stream(1 << 20):
+                yield chunk
+        finally:
+            obj.close()
+            obj.release_conn()
+
+    return StreamingResponse(_iter(), media_type=media)
 
 @app.get("/health")
 def health_check():

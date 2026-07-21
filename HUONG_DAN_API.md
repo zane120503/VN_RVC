@@ -375,6 +375,8 @@ file ghi âm.
 curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/records/12/stream" -o nghe.mp3
 # tải về (attachment)
 curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/records/12/download" -O -J
+# ảnh bìa (nếu lúc upload có gửi image) — gắn vào <img src="...">
+curl -H "X-API-Key: YOUR_API_KEY" "https://idolvoice.karaokeicool.vn/records/12/image" -o anh_bia.jpg
 ```
 
 Hai endpoint này nhận key qua header `X-API-Key` **hoặc** query `?api_key=` (cho thẻ `<audio>`).
@@ -523,11 +525,12 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 9 | POST | `/api/files/upload/audio` | Upload file ghi âm lên NAS 25 (MinIO) + lưu DB | ❌ |
 | 10 | GET | `/records/{record_id}/stream` | Nghe bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
 | 11 | GET | `/records/{record_id}/download` | Tải bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
-| 12 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
-| 13 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
-| 14 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
-| 15 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
-| 16 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
+| 12 | GET | `/records/{record_id}/image` | Ảnh bìa của bản ghi âm | ✅ (hoặc `?api_key=`) |
+| 13 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
+| 14 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
+| 15 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
+| 16 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
+| 17 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 
 ---
 
