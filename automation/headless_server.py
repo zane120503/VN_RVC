@@ -1468,6 +1468,33 @@ def download_record(record_id: int):
 _IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                 ".gif": "image/gif", ".webp": "image/webp"}
 
+# Tên file thumbnail trong thư mục bài hát trên media server (cùng chỗ với audio.mp3)
+SONG_IMAGE_FILENAME = os.environ.get("SONG_IMAGE_FILENAME", "image.jpg")
+
+@app.get("/songs/{song_id}/image", dependencies=[Depends(_flex_api_key)])
+def song_image(song_id: str):
+    """Thumbnail của bài hát (file image.jpg trên media server) — gắn được vào <img src="...?api_key=KEY">.
+
+    Dùng id số của bảng ktv_song (id trong kết quả GET /songs)."""
+    try:
+        r = requests.get(STREAM_INFO_URL, params={"id": song_id, "sourceType": "LOCAL"}, timeout=10)
+        r.raise_for_status()
+        video_url = r.json().get("video") or ""
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Không gọi được stream_info cho id={song_id}: {e}")
+    if not video_url:
+        raise HTTPException(status_code=404, detail="Bài hát không có media.")
+
+    image_url = video_url.rsplit("/", 1)[0] + "/" + SONG_IMAGE_FILENAME
+    try:
+        resp = requests.get(image_url, stream=True, timeout=15)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Không tải được thumbnail: {e}")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=404, detail=f"Bài này không có thumbnail (HTTP {resp.status_code}).")
+    return StreamingResponse(resp.iter_content(1 << 16),
+                             media_type=resp.headers.get("Content-Type", "image/jpeg"))
+
 @app.get("/records/{record_id}/image", dependencies=[Depends(_flex_api_key)])
 def record_image(record_id: int):
     """Ảnh bìa của bản ghi âm — gắn được vào <img src="...?api_key=KEY">."""

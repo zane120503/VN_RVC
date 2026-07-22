@@ -295,6 +295,23 @@ curl -H "X-API-Key: YOUR_API_KEY" https://idolvoice.karaokeicool.vn/check_song/1
 
 Luồng khuyến nghị cho app: `/songs?q=...` cho khách chọn bài → `/check_song/{id}` xác nhận → `/convert`.
 
+### `GET /songs/{song_id}/image` — Thumbnail bài hát
+
+Trả về ảnh thumbnail của bài (file `image.jpg` trên media server). Nhận key qua header
+hoặc `?api_key=` nên gắn thẳng vào thẻ `<img>`:
+
+```html
+<img src="https://idolvoice.karaokeicool.vn/songs/106673/image?api_key=YOUR_API_KEY" />
+```
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  "https://idolvoice.karaokeicool.vn/songs/106673/image" -o thumbnail.jpg
+```
+
+Dùng **id số** trong kết quả `GET /songs` (không phải id UUID của hệ thống khác).
+Bài không có media/thumbnail → `404`.
+
 ---
 
 ## 9. `POST /api/files/upload/audio` — Upload file ghi âm của khách lên NAS MinIO
@@ -526,11 +543,12 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 10 | GET | `/records/{record_id}/stream` | Nghe bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
 | 11 | GET | `/records/{record_id}/download` | Tải bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
 | 12 | GET | `/records/{record_id}/image` | Ảnh bìa của bản ghi âm | ✅ (hoặc `?api_key=`) |
-| 13 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
-| 14 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
-| 15 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
-| 16 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
-| 17 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
+| 13 | GET | `/songs/{song_id}/image` | Thumbnail của bài hát | ✅ (hoặc `?api_key=`) |
+| 14 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
+| 15 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
+| 16 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
+| 17 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
+| 18 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 
 ---
 
