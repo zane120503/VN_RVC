@@ -381,6 +381,12 @@ curl -X POST https://idolvoice.karaokeicool.vn/api/files/upload/audio \
 khi app khởi động** (bản ghi quá 1 tuần sẽ bị bỏ). Vì vậy server lỗi tạm thời không làm mất
 file ghi âm.
 
+**Tự động báo CMS:** upload thành công xong, server gọi
+`POST {CMS_METADATA_URL}` (mặc định `https://cms-crm.icool.com.vn/api/files/recordings/metadata`)
+gửi JSON `{id, name, cluster_id, room_code, created_time, is_4k, singer_name, record_id}`.
+Kết quả nằm trong response: `metadata_sent` (true/false) + `metadata_error` — gửi CMS lỗi
+**không** làm upload fail (file vẫn đã lưu MinIO + DB). Để trống `CMS_METADATA_URL` nếu muốn tắt.
+
 **Nghe lại / tải bản ghi đã upload:** dùng `record_id` trong response:
 
 ```html

@@ -1087,6 +1087,22 @@ def _safe_name(value: str) -> str:
     """Giữ chữ/số/gạch để làm tên thư mục/file trên MinIO."""
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value)).strip("_") or "unknown"
 
+# Sau khi upload bản thu thành công -> gọi CMS báo metadata (để trống = tắt)
+CMS_METADATA_URL = os.environ.get(
+    "CMS_METADATA_URL", "https://cms-crm.icool.com.vn/api/files/recordings/metadata")
+
+def notify_recording_metadata(payload):
+    """Gửi thông tin bản thu vừa upload sang CMS. Best-effort: lỗi chỉ log +
+    trả về trong response, KHÔNG làm upload fail (tránh client karaoke re-upload trùng)."""
+    try:
+        r = requests.post(CMS_METADATA_URL, json=payload, timeout=10)
+        r.raise_for_status()
+        print(f"[UploadAudio] Đã gửi metadata sang CMS (record_id={payload.get('record_id')}).")
+        return True, None
+    except Exception as e:
+        print(f"[UploadAudio] Gửi metadata sang CMS thất bại: {e}")
+        return False, str(e)
+
 _result_bucket_ready = False
 
 def _get_minio_result():
@@ -1396,8 +1412,22 @@ async def upload_audio(
     else:
         print("⚠️  [UploadAudio] DB chưa cấu hình -> chỉ lưu file lên MinIO, không có bản ghi DB.")
 
+    # Báo metadata bản thu sang CMS (best-effort)
+    metadata_sent, metadata_error = False, "CMS_METADATA_URL chưa cấu hình"
+    if CMS_METADATA_URL:
+        metadata_sent, metadata_error = notify_recording_metadata({
+            "id": id,
+            "name": name,
+            "cluster_id": cluster_id,
+            "room_code": room_code,
+            "created_time": created_time,
+            "is_4k": str(is_4k).lower() == "true",
+            "singer_name": singer_name,
+            "record_id": record_id,
+        })
+
     print(f"[UploadAudio] {name or audio.filename} -> {MINIO_BUCKET}/{audio_object} "
-          f"({round(audio_size/1048576, 2)} MB), db_id={record_id}")
+          f"({round(audio_size/1048576, 2)} MB), db_id={record_id}, cms={metadata_sent}")
     return {
         "status": "uploaded",
         "record_id": record_id,
@@ -1406,6 +1436,8 @@ async def upload_audio(
         "image_object": image_object,
         "size_mb": round(audio_size / 1048576, 2),
         "created_time": created_time,
+        "metadata_sent": metadata_sent,
+        "metadata_error": metadata_error,
     }
 
 # =====================================================================================

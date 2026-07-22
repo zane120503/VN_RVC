@@ -42,6 +42,8 @@ services:
       - MINIO_SECURE=${MINIO_SECURE:-0}
       # Bảng Postgres lưu thông tin bản ghi âm đã upload
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
+      # Sau khi upload bản thu -> gọi CMS báo metadata (để trống = tắt)
+      - CMS_METADATA_URL=${CMS_METADATA_URL:-https://cms-crm.icool.com.vn/api/files/recordings/metadata}
       # Bảng Postgres lưu danh sách bài đã convert (khách nghe thử rồi tải)
       - CONVERT_TABLE=${CONVERT_TABLE:-rvc_converted_songs}
       # Thời gian giữ file trong audios/: kết quả convert (*_COVER_*) và file trung gian
