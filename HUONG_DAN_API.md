@@ -50,9 +50,26 @@ Upload file ghi âm của khách → hệ thống tách giọng, huấn luyện 
 | Tham số | Kiểu | Bắt buộc | Mặc định | Mô tả |
 |---|---|---|---|---|
 | `customer_id` | text | ✅ | — | Mã khách hàng (chữ/số/gạch; ký tự khác bị thay bằng `_`) |
-| `training_files` | file (nhiều) | ✅ | — | File ghi âm giọng khách (wav/mp3...). Lặp lại field để gửi nhiều file |
+| `record_ids` | text | ⭕ chọn 1 | — | Danh sách `record_id` các bản thu khách **đã upload** (cách nhau dấu phẩy, vd `421,422`) — server tự lấy file từ MinIO |
+| `training_files` | file (nhiều) | ⭕ chọn 1 | — | HOẶC upload file ghi âm trực tiếp (wav/mp3...). Lặp lại field để gửi nhiều file |
 | `epochs` | int | ❌ | 150 | Số vòng huấn luyện (100–300 khuyến nghị) |
 | `force_retrain` | bool | ❌ | false | `true` = xóa model cũ, train dữ liệu mới thay thế |
+
+(`record_ids` và `training_files` dùng được đồng thời — server gộp cả hai nguồn.)
+
+**Cách 1 — từ các bản thu khách đã hát (khuyên dùng cho app):** khách chọn bài trong danh
+sách đã thu (lấy `record_id` từ response upload / DB), app chỉ gửi id — không phải tải file
+về rồi upload lại:
+
+```bash
+curl -X POST https://idolvoice.karaokeicool.vn/train \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "customer_id=KH001" \
+  -F "epochs=150" \
+  -F "record_ids=421,422,430"
+```
+
+**Cách 2 — upload file trực tiếp:**
 
 ```bash
 curl -X POST https://idolvoice.karaokeicool.vn/train \

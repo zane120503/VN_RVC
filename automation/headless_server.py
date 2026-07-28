@@ -606,9 +606,15 @@ async def train_customer_model(
     customer_id: str = Form(...),
     epochs: int = Form(150),
     force_retrain: bool = Form(False),
-    training_files: List[UploadFile] = File(...),
+    record_ids: Optional[str] = Form(None),
+    training_files: Optional[List[UploadFile]] = File(None),
 ):
     """API 1: Train model giọng từ file ghi âm của khách hàng.
+
+    Nguồn file train — dùng 1 trong 2 (hoặc cả hai):
+      - record_ids: danh sách record_id các bản thu khách đã upload (cách nhau dấu phẩy,
+        vd "421,422,430") -> server tự lấy file từ MinIO, app KHÔNG phải tải về upload lại.
+      - training_files: upload file trực tiếp.
 
     - Model được lưu theo customer_id (và ghi vào DB khi train xong).
     - Nếu khách đã có model và force_retrain=false -> trả về luôn, không train lại.
@@ -642,7 +648,37 @@ async def train_customer_model(
             shutil.copyfileobj(upload.file, out)
         return dest
 
-    train_paths = [_save(f) for f in training_files]
+    train_paths = []
+    n_uploaded = n_from_records = 0
+
+    if training_files:
+        for f in training_files:
+            if f.filename:
+                train_paths.append(_save(f))
+                n_uploaded += 1
+
+    # Lấy các bản thu đã upload sẵn trên MinIO theo record_id
+    if record_ids:
+        try:
+            ids = [int(x) for x in re.split(r"[,\s]+", record_ids.strip()) if x]
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="record_ids không hợp lệ — gửi các số cách nhau dấu phẩy, vd: 421,422")
+        client = _get_minio()
+        for rid in ids:
+            rec = _get_record(rid)  # 404 nếu không tồn tại
+            dest = os.path.join(session_dir, f"record_{rid}_{os.path.basename(rec['audio_object'])}")
+            try:
+                client.fget_object(rec["bucket"], rec["audio_object"], dest)
+            except Exception as e:
+                raise HTTPException(status_code=502,
+                                    detail=f"Không tải được bản thu record_id={rid} từ MinIO: {e}")
+            train_paths.append(dest)
+            n_from_records += 1
+
+    if not train_paths:
+        raise HTTPException(status_code=400,
+                            detail="Cần gửi training_files (file) hoặc record_ids (id bản thu đã upload).")
 
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {
@@ -670,7 +706,9 @@ async def train_customer_model(
         "task_id": task_id,
         "customer_id": customer_id,
         "model_name": model_name,
-        "message": f"Đã nhận {len(train_paths)} file ghi âm. Bắt đầu train model (vị trí hàng đợi: {q_size}).",
+        "message": f"Đã nhận {len(train_paths)} file ghi âm "
+                   f"({n_uploaded} upload + {n_from_records} bản thu từ MinIO). "
+                   f"Bắt đầu train model (vị trí hàng đợi: {q_size}).",
         "queue_size": q_size,
     }
 
