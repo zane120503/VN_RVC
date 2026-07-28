@@ -3,6 +3,7 @@ import re
 import sys
 import shutil
 import requests
+import subprocess
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
 from fastapi.security import APIKeyHeader
@@ -478,6 +479,38 @@ def download_result(task_id: str):
 # Nơi lưu file người dùng upload trực tiếp (nằm trong volume ./audios đã mount)
 UPLOAD_DIR = "/app/audios/uploads"
 
+# Giới hạn TỔNG thời lượng file train mỗi lần gọi (phút). 0 = không giới hạn.
+MAX_TRAIN_MINUTES = float(os.environ.get("MAX_TRAIN_MINUTES", "30"))
+
+def _audio_duration_sec(path):
+    """Đọc thời lượng file audio (giây) bằng ffprobe; lỗi thì trả None."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+def check_training_duration(paths, session_dir):
+    """Chặn (400) nếu tổng thời lượng file train vượt MAX_TRAIN_MINUTES phút.
+    Dọn session_dir trước khi báo lỗi để không rác đĩa."""
+    if MAX_TRAIN_MINUTES <= 0:
+        return
+    total = 0.0
+    for p in paths:
+        d = _audio_duration_sec(p)
+        if d:
+            total += d
+    if total > MAX_TRAIN_MINUTES * 60:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tổng thời lượng file train là {total/60:.1f} phút — vượt giới hạn "
+                   f"{MAX_TRAIN_MINUTES:.0f} phút. Hãy gửi ít dữ liệu hơn "
+                   f"(10–{MAX_TRAIN_MINUTES:.0f} phút giọng rõ là đủ để train tốt).")
+
 # API lấy vị trí media của bài hát theo id (trả JSON có trường "video" = URL .mp4)
 STREAM_INFO_URL = os.environ.get("STREAM_INFO_URL", "http://172.16.10.12:3004/stream/stream_info")
 # Tên file audio (có giọng gốc) trong cùng thư mục bài hát. video.mp4 chỉ có video,
@@ -560,6 +593,9 @@ async def run_upload(
         raise HTTPException(status_code=400, detail="Cần cung cấp target_song_id hoặc target_song (file).")
 
     train_paths = [_save(f) for f in training_files]
+
+    # Giới hạn tổng thời lượng dữ liệu train (mặc định 30 phút)
+    check_training_duration(train_paths, session_dir)
 
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {
@@ -679,6 +715,9 @@ async def train_customer_model(
     if not train_paths:
         raise HTTPException(status_code=400,
                             detail="Cần gửi training_files (file) hoặc record_ids (id bản thu đã upload).")
+
+    # Giới hạn tổng thời lượng dữ liệu train (mặc định 30 phút)
+    check_training_duration(train_paths, session_dir)
 
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {

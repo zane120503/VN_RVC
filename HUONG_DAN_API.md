@@ -112,6 +112,7 @@ xong giữ 1 ngày rồi janitor xóa — cần lại thì tải lại, khách *
 
 **⚠️ Yêu cầu dữ liệu train:**
 - Tổng thời lượng **giọng nói thực tế** (đã trừ khoảng lặng) tối thiểu **60 giây** — ít hơn task sẽ `failed` với thông báo trong `logs`.
+- Tổng thời lượng file gửi lên **tối đa 30 phút** (`MAX_TRAIN_MINUTES`) — vượt sẽ bị chặn ngay với lỗi `400` (không vào hàng đợi).
 - Nên gửi 10–30 phút ghi âm, rõ, ít tạp âm để chất lượng tốt.
 - Thời gian train: ~20–60 phút tùy dữ liệu và epochs (GPU RTX 5070 Ti).
 
@@ -579,7 +580,7 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 
 | HTTP | Ý nghĩa | Cách xử lý |
 |---|---|---|
-| 400 | Thiếu tham số (vd: không gửi `target_song_id` lẫn `target_song`) / task chưa `completed` khi download | Kiểm tra request |
+| 400 | Thiếu tham số (vd: không gửi `target_song_id` lẫn `target_song`) / task chưa `completed` khi download / tổng file train vượt 30 phút | Kiểm tra request; gửi ít dữ liệu train hơn |
 | 401 | Sai hoặc thiếu `X-API-Key` | Gửi đúng header |
 | 404 | Khách chưa có model / `task_id` không tồn tại / bài hát không có media / `conversion_id` không tồn tại | Train trước; kiểm tra id |
 | 410 | Bản convert còn trong DB nhưng file đã bị dọn (quá 90 ngày) | Gọi `/convert` lại |

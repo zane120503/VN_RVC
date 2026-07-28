@@ -39,6 +39,8 @@ services:
       - MINIO_MODEL_BUCKET=${MINIO_MODEL_BUCKET:-customer-models}
       # Model trên đĩa server chỉ là cache: quá N ngày không dùng thì xóa (0 = giữ vĩnh viễn)
       - MODEL_CACHE_DAYS=${MODEL_CACHE_DAYS:-1}
+      # Tổng thời lượng file train tối đa mỗi lần gọi /train (phút, 0 = không giới hạn)
+      - MAX_TRAIN_MINUTES=${MAX_TRAIN_MINUTES:-30}
       - MINIO_SECURE=${MINIO_SECURE:-0}
       # Bảng Postgres lưu thông tin bản ghi âm đã upload
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
