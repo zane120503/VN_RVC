@@ -523,6 +523,49 @@ curl -X POST https://idolvoice.karaokeicool.vn/records/315424/ai_edit \
   (mỗi bản kèm `record_id` để app biết nó thuộc bản thu nào).
 - Bài không có audio giọng ca sĩ → `409` kèm lý do (đừng cho bấm, dùng `ai_check` trước).
 
+### Khi nào phải train lại, khi nào không
+
+Model học **giọng của khách**, không gắn với bài hát nào — nên khách chọn bài khác để đổi giọng
+thì **không phải train lại**, chỉ mất 2–5 phút. Chỉ train lại trong các trường hợp sau:
+
+| Tình huống | Có train lại? | Thời gian |
+|---|---|---|
+| Cùng `customer_id`, khách sửa AI cho bản thu bài khác | ❌ Không — chỉ đổi giọng | 2–5 phút |
+| **Không truyền `customer_id`** | ✅ Có — mỗi bản thu thành một “khách” riêng (`rec{record_id}`) | 20–60 phút mỗi lần |
+| Truyền `force_retrain=true` | ✅ Có — xóa model cũ (cả trên MinIO) và thay model mới | 20–60 phút |
+
+**1. Khách hát bài khác, chỉ đổi giọng — dùng lại model cũ:**
+```bash
+curl -X POST https://idolvoice.karaokeicool.vn/records/315999/ai_edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "customer_id=KH001"
+```
+→ `"will_train": false`, `"steps": ["convert"]`.
+
+**2. Train lại bằng một bản thu khác — thay hẳn model cũ:**
+```bash
+curl -X POST https://idolvoice.karaokeicool.vn/records/315999/ai_edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "customer_id=KH001" \
+  -F "force_retrain=true"
+```
+
+**3. Train lại và gộp nhiều bản thu — giọng giống hơn (khuyên dùng):**
+```bash
+curl -X POST https://idolvoice.karaokeicool.vn/records/315999/ai_edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "customer_id=KH001" \
+  -F "force_retrain=true" \
+  -F "extra_record_ids=315424,315418"
+```
+
+> ⚠️ `force_retrain=true` **chỉ train trên các bản thu gửi trong chính lần gọi đó**; model cũ bị
+> xóa hẳn nên dữ liệu train trước đó không tự cộng dồn. Muốn “thêm bài cho giọng giống hơn” thì
+> phải liệt kê lại cả các bản thu cũ qua `extra_record_ids`, đừng chỉ gửi mỗi bài mới.
+
+**Khuyến nghị cho app:** luôn truyền `customer_id` là mã khách thật. Bỏ trống thì mỗi bản thu
+sinh một model riêng — khách phải chờ train lại từ đầu cho từng bài, và tốn chỗ lưu trên MinIO.
+
 ### ⚠️ App phòng hát cần gửi thêm `song_id`
 
 Media server chỉ tra bài bằng **id số** của `ktv_song`, trong khi app đang gửi `id` là **UUID**
