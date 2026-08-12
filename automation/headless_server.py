@@ -188,12 +188,13 @@ def init_convert_table():
                 )""")
             # Bảng tạo từ bản cũ chưa có cột result_object -> bổ sung
             cur.execute(f"ALTER TABLE {CONVERT_TABLE} ADD COLUMN IF NOT EXISTS result_object VARCHAR")
+            cur.execute(f"ALTER TABLE {CONVERT_TABLE} ADD COLUMN IF NOT EXISTS record_id INTEGER")
         print(f"DB danh sách convert sẵn sàng (bảng {CONVERT_TABLE}).")
     except Exception as e:
         print(f"⚠️  Không khởi tạo được bảng convert: {e}")
 
 def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pitch_shift,
-                        result_path, result_object=None):
+                        result_path, result_object=None, record_id=None):
     """Lưu 1 bản convert hoàn tất để khách nghe thử / tải lại sau."""
     if not _db_enabled():
         return
@@ -203,10 +204,10 @@ def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pi
             cur.execute(f"""
                 INSERT INTO {CONVERT_TABLE}
                     (task_id, customer_id, model_name, song_id, song_name, pitch_shift,
-                     result_path, result_object, file_size)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     result_path, result_object, file_size, record_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (task_id, customer_id, model_name, song_id, song_name, pitch_shift,
-                      result_path, result_object, size))
+                      result_path, result_object, size, record_id))
         print(f"[DB] Đã lưu bản convert của khách {customer_id}: {result_path} (minio: {result_object})")
     except Exception as e:
         print(f"[DB] Lỗi lưu bản convert khách {customer_id}: {e}")
@@ -303,8 +304,23 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                     index_object=index_object,
                 )
 
+            # Task gộp (train + convert): final_output là file nhạc, model lấy từ weights
+            if kind == "full" and payload.get("customer_id"):
+                model_file = _pick_latest_model_file(payload["model_name"])
+                if model_file:
+                    model_object, index_object = upload_model_to_minio(payload["model_name"])
+                    save_customer_model(
+                        customer_id=payload["customer_id"],
+                        model_name=payload["model_name"],
+                        model_file=model_file,
+                        index_file=os.path.basename(_pick_index_file(payload["model_name"]) or "") or None,
+                        epochs=payload.get("epochs"),
+                        model_object=model_object,
+                        index_object=index_object,
+                    )
+
             # Convert xong -> đẩy kết quả lên MinIO + lưu vào danh sách để khách nghe thử rồi tải
-            if kind == "convert":
+            if kind in ("convert", "full"):
                 result_object = upload_result_to_minio(final_output, payload.get("customer_id"))
                 save_converted_song(
                     task_id=task_id,
@@ -315,6 +331,7 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                     pitch_shift=payload.get("pitch_shift"),
                     result_path=final_output,
                     result_object=result_object,
+                    record_id=payload.get("record_id"),
                 )
         else:
             TASKS[task_id]["status"] = "failed"
@@ -330,7 +347,7 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
 
     finally:
         # Model trên đĩa chỉ là cache: làm mới hạn (MODEL_CACHE_DAYS tính từ LẦN DÙNG CUỐI)
-        if kind == "convert" and payload.get("model_name"):
+        if kind in ("convert", "full") and payload.get("model_name"):
             _touch_model(payload["model_name"])
 
         # Dọn file input đã upload để không đầy đĩa (chỉ áp dụng task từ /run_upload).
@@ -1376,21 +1393,25 @@ def init_record_table():
                     audio_size   BIGINT,
                     uploaded_at  TIMESTAMP DEFAULT NOW()
                 )""")
+            # media_id là id bài hát client gửi (có thể là UUID của catalog khác);
+            # song_id là id SỐ trong ktv_song — cái media server dùng để lấy audio giọng ca sĩ.
+            cur.execute(f"ALTER TABLE {RECORD_TABLE} ADD COLUMN IF NOT EXISTS song_id VARCHAR")
         print(f"DB bảng ghi âm sẵn sàng (bảng {RECORD_TABLE}).")
     except Exception as e:
         print(f"⚠️  Không khởi tạo được bảng ghi âm: {e}")
 
 def save_recorded_file(media_id, name, cluster_id, room_code, singer_name,
-                       is_4k, created_time, audio_object, image_object, audio_size):
+                       is_4k, created_time, audio_object, image_object, audio_size,
+                       song_id=None):
     """Ghi 1 dòng vào bảng RECORD_TABLE, trả về id của bản ghi."""
     with _db_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""
             INSERT INTO {RECORD_TABLE}
-                (media_id, name, cluster_id, room_code, singer_name, is_4k,
+                (song_id, media_id, name, cluster_id, room_code, singer_name, is_4k,
                  created_time, bucket, audio_object, image_object, audio_size)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-            """, (media_id, name, cluster_id, room_code, singer_name, is_4k,
+            """, (song_id, media_id, name, cluster_id, room_code, singer_name, is_4k,
                   created_time, MINIO_BUCKET, audio_object, image_object, audio_size))
         return cur.fetchone()[0]
 
@@ -1422,6 +1443,7 @@ async def upload_audio(
     created_time: Optional[str] = Form(None),
     is_4k: Optional[str] = Form(None),
     singer_name: Optional[str] = Form(None),
+    song_id: Optional[str] = Form(None),
     audio: UploadFile = File(...),
     image: Optional[UploadFile] = File(None),
 ):
@@ -1478,8 +1500,9 @@ async def upload_audio(
     if _db_enabled():
         try:
             record_id = save_recorded_file(
-                media_id=id, name=name, cluster_id=cluster_id, room_code=room_code,
-                singer_name=singer_name, is_4k=str(is_4k).lower() == "true",
+                media_id=id, song_id=song_id, name=name, cluster_id=cluster_id,
+                room_code=room_code, singer_name=singer_name,
+                is_4k=str(is_4k).lower() == "true",
                 created_time=created_time, audio_object=audio_object,
                 image_object=image_object, audio_size=audio_size,
             )
@@ -1527,7 +1550,8 @@ def _get_record(record_id: int):
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, name, singer_name, bucket, audio_object, image_object "
+                f"SELECT id, name, singer_name, bucket, audio_object, image_object, "
+                f"media_id, song_id "
                 f"FROM {RECORD_TABLE} WHERE id = %s",
                 (record_id,))
             row = cur.fetchone()
@@ -1536,7 +1560,8 @@ def _get_record(record_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi âm.")
     return {"id": row[0], "name": row[1], "singer_name": row[2],
-            "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4], "image_object": row[5]}
+            "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4], "image_object": row[5],
+            "media_id": row[6], "song_id": row[7]}
 
 def _stream_record(rec, as_download):
     obj_name = rec["audio_object"]
@@ -1573,6 +1598,177 @@ def stream_record(record_id: int):
 def download_record(record_id: int):
     """Tải bản ghi âm đã upload về (attachment)."""
     return _stream_record(_get_record(record_id), as_download=True)
+
+# =====================================================================================
+# CHỈNH SỬA BẢN THU BẰNG AI — 1 nút bấm trên 1 bản thu:
+# kiểm tra bài có audio giọng ca sĩ -> train giọng khách (nếu chưa có model) -> đổi giọng
+# =====================================================================================
+
+def _resolve_song_id(rec):
+    """Tìm id SỐ trong ktv_song cho bản thu — media server chỉ tra được bằng id này.
+
+    Thứ tự: cột song_id (app gửi KTVMedia.songId) -> media_id nếu là số ->
+    khớp tên bài trong ktv_song khi CHỈ có đúng 1 kết quả. Trả (song_id, cách khớp)."""
+    if rec.get("song_id") and str(rec["song_id"]).isdigit():
+        return str(rec["song_id"]), "song_id"
+    if rec.get("media_id") and str(rec["media_id"]).isdigit():
+        return str(rec["media_id"]), "media_id"
+
+    name = (rec.get("name") or "").strip()
+    if name and _db_enabled():
+        try:
+            with _db_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM ktv_song WHERE deleted_flag IS NOT TRUE "
+                    "AND file_path IS NOT NULL AND file_path <> '' AND lower(name) = lower(%s) "
+                    "LIMIT 2", (name,))
+                rows = cur.fetchall()
+            if len(rows) == 1:   # nhiều bài trùng tên -> không đoán, tránh chọn nhầm bản
+                return str(rows[0][0]), "name"
+        except Exception as e:
+            print(f"[AI-Edit] Lỗi khớp tên bài '{name}': {e}")
+    return None, None
+
+def _record_target_song(rec):
+    """Bản thu này có bài gốc (audio giọng ca sĩ) trên media server không?
+    Trả (thông tin bài | None, lý do không dùng được)."""
+    song_id, matched_by = _resolve_song_id(rec)
+    if not song_id:
+        return None, (f"Không tra được bài \"{rec.get('name') or rec.get('media_id')}\" trong danh mục "
+                      f"(bài YouTube hoặc app chưa gửi song_id) nên không có audio giọng ca sĩ để đổi giọng.")
+    song = _check_song_available({"id": song_id, "name": rec.get("name")})
+    if not song:
+        return None, (f"Bài \"{rec.get('name') or song_id}\" chưa có audio giọng ca sĩ trên "
+                      f"media server (chưa đồng bộ/xuất bản) nên chưa đổi giọng được.")
+    song["matched_by"] = matched_by
+    return song, None
+
+def _has_model(customer_id, model_name):
+    if _pick_latest_model_file(model_name):
+        return True
+    rec = get_customer_model(customer_id)
+    return bool(rec and rec.get("model_object"))
+
+@app.get("/records/{record_id}/ai_check", dependencies=[Depends(verify_api_key)])
+def ai_edit_check(record_id: int, customer_id: Optional[str] = None):
+    """App gọi trước khi hiện nút "Chỉnh sửa bản thu AI" trên một bản thu.
+
+    `can_edit=false` -> ẩn/khoá nút và hiển thị `reason` cho khách."""
+    rec = _get_record(record_id)
+    song, reason = _record_target_song(rec)
+    cus = customer_id or f"rec{record_id}"
+    has_model = _has_model(cus, _model_name_for(cus))
+    return {
+        "record_id": record_id,
+        "can_edit": bool(song),
+        "reason": reason,
+        "song": song,
+        "customer_id": cus,
+        "has_model": has_model,
+        "will_train": not has_model,
+        "eta_minutes": "2–5" if has_model else "20–60",
+    }
+
+@app.post("/records/{record_id}/ai_edit", dependencies=[Depends(verify_api_key)])
+async def ai_edit_record(
+    record_id: int,
+    customer_id: Optional[str] = Form(None),
+    pitch_shift: int = Form(0),
+    epochs: int = Form(150),
+    force_retrain: bool = Form(False),
+    extra_record_ids: Optional[str] = Form(None),
+):
+    """Khách bấm "Chỉnh sửa bản thu AI" trên 1 bản thu — làm trọn gói trong 1 lần gọi:
+
+    1. Kiểm tra bài khách đã hát có audio giọng ca sĩ trên media server (không có -> 409).
+    2. Chưa có model giọng khách -> train từ chính bản thu này
+       (thêm `extra_record_ids` để gộp nhiều bản thu cho model tốt hơn).
+    3. Đổi giọng bài gốc của ca sĩ bằng model đó.
+
+    `customer_id` để trống -> model gắn theo bản thu (`rec{record_id}`); truyền mã khách
+    thật thì model dùng lại được cho các bản thu sau, khỏi train lại.
+    """
+    rec = _get_record(record_id)
+
+    song, reason = _record_target_song(rec)
+    if not song:
+        raise HTTPException(status_code=409, detail=reason)
+
+    cus = customer_id or f"rec{record_id}"
+    model_name = _model_name_for(cus)
+
+    # Model có sẵn (đĩa hoặc MinIO) -> chỉ đổi giọng; chưa có -> train + đổi giọng trong 1 task
+    will_train = force_retrain or not restore_model_from_minio(model_name)
+
+    session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
+    os.makedirs(session_dir, exist_ok=True)
+
+    train_paths = []
+    if will_train:
+        ids = [record_id]
+        if extra_record_ids:
+            try:
+                ids += [int(x) for x in re.split(r"[,\s]+", extra_record_ids.strip()) if x]
+            except ValueError:
+                raise HTTPException(status_code=400,
+                                    detail="extra_record_ids không hợp lệ — các số cách nhau dấu phẩy, vd: 421,422")
+        client = _get_minio()
+        for rid in list(dict.fromkeys(ids)):
+            r = rec if rid == record_id else _get_record(rid)
+            dest = os.path.join(session_dir, f"record_{rid}_{os.path.basename(r['audio_object'])}")
+            try:
+                client.fget_object(r["bucket"], r["audio_object"], dest)
+            except Exception as e:
+                shutil.rmtree(session_dir, ignore_errors=True)
+                raise HTTPException(status_code=502,
+                                    detail=f"Không tải được bản thu record_id={rid} từ MinIO: {e}")
+            train_paths.append(dest)
+        check_training_duration(train_paths, session_dir)
+
+    # Bài gốc của ca sĩ (audio.mp3 trên media server)
+    target_path = fetch_target_by_id(str(song["id"]), session_dir)
+
+    kind = "full" if will_train else "convert"
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {
+        "status": "queued",
+        "message": "Waiting in queue...",
+        "result_path": None,
+        "logs": "",
+        "created_at": time.time(),
+        "kind": kind,
+        "customer_id": cus,
+        "record_id": record_id,
+        "upload_dir": session_dir,
+    }
+    payload = {
+        "target_song": target_path,
+        "model_name": model_name,
+        "pitch_shift": pitch_shift,
+        "customer_id": cus,
+        "song_id": str(song["id"]),
+        "song_name": rec.get("name") or song.get("name"),
+        "record_id": record_id,
+    }
+    if will_train:
+        payload.update({"training_files": train_paths, "epochs": epochs, "force_retrain": force_retrain})
+    TASK_QUEUE.put((task_id, kind, payload))
+
+    q_size = TASK_QUEUE.qsize()
+    print(f"[AI-Edit] Task {task_id} ({kind}) cho record {record_id}, khách {cus}. Queue: {q_size}")
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "record_id": record_id,
+        "customer_id": cus,
+        "song": song,
+        "will_train": will_train,
+        "steps": ["train", "convert"] if will_train else ["convert"],
+        "eta_minutes": "20–60" if will_train else "2–5",
+        "queue_size": q_size,
+        "message": ("Đang train giọng khách rồi đổi giọng bài hát."
+                    if will_train else "Khách đã có model — đang đổi giọng bài hát."),
+    }
 
 _IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                 ".gif": "image/gif", ".webp": "image/webp"}

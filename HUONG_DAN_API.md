@@ -9,7 +9,21 @@ Hệ thống đổi giọng ca sĩ bằng giọng khách hàng, chạy headless 
 
 ---
 
-## 🔄 Luồng sử dụng chuẩn (theo khách hàng)
+## ⚡ Luồng một nút (khách bấm “Chỉnh sửa bản thu AI”)
+
+```
+1. GET  /records/{record_id}/ai_check  → bản thu này có sửa AI được không (hiện/ẩn nút)
+2. POST /records/{record_id}/ai_edit   → tự train giọng (nếu cần) + đổi giọng bài đó
+   GET  /status/{task_id}              → poll đến khi completed
+3. GET  /conversions/{customer_id}     → nghe thử · tải về
+```
+
+Chi tiết ở [mục 10](#10-chỉnh-sửa-bản-thu-bằng-ai--một-nút-bấm). Muốn tự điều khiển từng bước
+(chọn bài khác, gộp nhiều bản thu để train) thì dùng luồng thủ công dưới đây.
+
+---
+
+## 🔄 Luồng thủ công (tự gọi từng bước)
 
 ```
 1. GET  /model/{customer_id}     → khách đã có model chưa?
@@ -439,7 +453,93 @@ Server tự stream file từ MinIO — client không cần truy cập trực ti�
 
 ---
 
-## 10. Danh sách bài đã convert — nghe thử rồi tải
+## 10. Chỉnh sửa bản thu bằng AI — một nút bấm
+
+Luồng khách dùng thực tế: khách mở một bản thu của mình → bấm **“Chỉnh sửa bản thu AI”** →
+hệ thống kiểm tra bài đó có audio giọng ca sĩ không → có thì train giọng khách (nếu chưa có
+model) rồi đổi giọng luôn bài gốc. App chỉ gọi **1 API** thay vì tự ghép `/train` + `/convert`.
+
+### `GET /records/{record_id}/ai_check` — có hiện nút không?
+
+Gọi khi vẽ danh sách bản thu, để biết bản nào chỉnh sửa AI được.
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  "https://idolvoice.karaokeicool.vn/records/315424/ai_check?customer_id=KH001"
+```
+
+```json
+{
+  "record_id": 315424,
+  "can_edit": true,
+  "reason": null,
+  "song": {"id": "104458", "name": "CHỜ EM THÀNH CÔ DÂU", "size_mb": 7.1, "matched_by": "name"},
+  "customer_id": "KH001",
+  "has_model": false,
+  "will_train": true,
+  "eta_minutes": "20–60"
+}
+```
+
+`can_edit=false` → ẩn/khoá nút và hiện `reason` cho khách (thường là **bài YouTube** hoặc bài
+chưa đồng bộ lên media server — hai loại này không có audio giọng ca sĩ để đổi).
+
+### `POST /records/{record_id}/ai_edit` — bấm nút
+
+| Tham số | Bắt buộc | Mặc định | Mô tả |
+|---|---|---|---|
+| `customer_id` | ❌ | `rec{record_id}` | Mã khách. **Nên truyền mã khách thật** để model dùng lại cho các bản thu sau, khỏi train lại |
+| `pitch_shift` | ❌ | 0 | Dịch cao độ (xem mục 4) |
+| `epochs` | ❌ | 150 | Số vòng train (chỉ dùng khi phải train) |
+| `force_retrain` | ❌ | false | Train lại thay model cũ |
+| `extra_record_ids` | ❌ | — | Gộp thêm bản thu khác của khách vào dữ liệu train cho giọng giống hơn |
+
+```bash
+curl -X POST https://idolvoice.karaokeicool.vn/records/315424/ai_edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "customer_id=KH001" \
+  -F "pitch_shift=0"
+```
+
+**Response `200`:**
+```json
+{
+  "status": "queued",
+  "task_id": "a1b2c3d4-…",
+  "record_id": 315424,
+  "customer_id": "KH001",
+  "song": {"id": "104458", "name": "CHỜ EM THÀNH CÔ DÂU", "size_mb": 7.1},
+  "will_train": true,
+  "steps": ["train", "convert"],
+  "eta_minutes": "20–60",
+  "queue_size": 1,
+  "message": "Đang train giọng khách rồi đổi giọng bài hát."
+}
+```
+
+- Khách **chưa có model** → 1 task gộp train + đổi giọng (~20–60 phút), `steps: ["train","convert"]`.
+- Khách **đã có model** → chỉ đổi giọng (~2–5 phút), `steps: ["convert"]`.
+- Theo dõi bằng `GET /status/{task_id}`; xong thì lấy ở `GET /conversions/{customer_id}`
+  (mỗi bản kèm `record_id` để app biết nó thuộc bản thu nào).
+- Bài không có audio giọng ca sĩ → `409` kèm lý do (đừng cho bấm, dùng `ai_check` trước).
+
+### ⚠️ App phòng hát cần gửi thêm `song_id`
+
+Media server chỉ tra bài bằng **id số** của `ktv_song`, trong khi app đang gửi `id` là **UUID**
+(`66556161-4fe6-…`) nên hệ thống không tìm ra bài. `KTVMedia` có sẵn cả hai — thêm `songId`
+vào request upload là xong:
+
+```kotlin
+media.id.toRequestBodyOrNull()?.let { params["id"] = it }
+(media as? KTVMedia)?.songId?.toString()?.toRequestBodyOrNull()?.let { params["song_id"] = it }
+```
+
+Trong lúc chờ, server tự khớp theo **tên bài** khi tên đó chỉ ứng với đúng một bài trong danh
+mục (`matched_by: "name"`); trùng tên nhiều bản thì bỏ qua để không chọn nhầm.
+
+---
+
+## 11. Danh sách bài đã convert — nghe thử rồi tải
 
 Mỗi lần task `/convert` hoàn tất: kết quả được ghi vào bảng `rvc_converted_songs` **và
 đẩy lên MinIO** (bucket `converted-songs`, tự xóa theo lifecycle sau 90 ngày). Bộ 3 endpoint
@@ -526,7 +626,7 @@ DB nhưng file đã bị dọn sau 90 ngày.
 
 ---
 
-## 11. API cũ (giữ để tương thích)
+## 12. API cũ (giữ để tương thích)
 
 ### `POST /run_upload` — Train + convert trong 1 lần gọi
 ```bash
@@ -568,11 +668,13 @@ curl -X POST https://idolvoice.karaokeicool.vn/run \
 | 11 | GET | `/records/{record_id}/download` | Tải bản ghi âm đã upload | ✅ (hoặc `?api_key=`) |
 | 12 | GET | `/records/{record_id}/image` | Ảnh bìa của bản ghi âm | ✅ (hoặc `?api_key=`) |
 | 13 | GET | `/songs/{song_id}/image` | Thumbnail của bài hát | ✅ (hoặc `?api_key=`) |
-| 14 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
-| 15 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
-| 16 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
-| 17 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
-| 18 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
+| 14 | GET | `/records/{record_id}/ai_check` | Bản thu này có chỉnh sửa AI được không | ✅ |
+| 15 | POST | `/records/{record_id}/ai_edit` | **Một nút**: train giọng khách + đổi giọng bài đó | ✅ |
+| 16 | GET | `/conversions/{customer_id}` | Danh sách bản đã convert của khách | ✅ |
+| 17 | GET | `/conversions/{id}/stream` | Nghe thử bản convert (phát inline) | ✅ (hoặc `?api_key=`) |
+| 18 | GET | `/conversions/{id}/download` | Tải bản convert về | ✅ (hoặc `?api_key=`) |
+| 19 | POST | `/run_upload` | (Cũ) Train + convert 1 lần | ✅ |
+| 20 | POST | `/run` | (Cũ) Như trên, input là path trên server | ✅ |
 
 ---
 
