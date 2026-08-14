@@ -574,7 +574,7 @@ def fetch_target_by_id(song_id: str, dest_dir: str) -> str:
     return dest
 
 @app.post("/run_upload", dependencies=[Depends(verify_api_key)])
-async def run_upload(
+def run_upload(
     model_name: str = Form(...),
     epochs: int = Form(20),
     pitch_shift: int = Form(0),
@@ -655,7 +655,7 @@ def _model_name_for(customer_id: str) -> str:
     return f"cus_{safe}"
 
 @app.post("/train", dependencies=[Depends(verify_api_key)])
-async def train_customer_model(
+def train_customer_model(
     customer_id: str = Form(...),
     epochs: int = Form(150),
     force_retrain: bool = Form(False),
@@ -787,7 +787,7 @@ def customer_model_info(customer_id: str):
     }
 
 @app.post("/convert", dependencies=[Depends(verify_api_key)])
-async def convert_with_customer_model(
+def convert_with_customer_model(
     customer_id: str = Form(...),
     pitch_shift: int = Form(0),
     target_song_id: Optional[str] = Form(None),
@@ -1435,7 +1435,7 @@ def _put_minio(client, upload: UploadFile, object_name: str, default_type: str, 
 # Không yêu cầu X-API-Key: giữ nguyên contract của karaoke_system (client Retrofit
 # không gửi header này) — chỉ cần đổi recordingConfig.url là dùng được, không sửa client.
 @app.post("/api/files/upload/audio")
-async def upload_audio(
+def upload_audio(
     name: Optional[str] = Form(None),
     id: Optional[str] = Form(None),
     cluster_id: Optional[str] = Form(None),
@@ -1670,7 +1670,7 @@ def ai_edit_check(record_id: int, customer_id: Optional[str] = None):
     }
 
 @app.post("/records/{record_id}/ai_edit", dependencies=[Depends(verify_api_key)])
-async def ai_edit_record(
+def ai_edit_record(
     record_id: int,
     customer_id: Optional[str] = Form(None),
     pitch_shift: int = Form(0),
