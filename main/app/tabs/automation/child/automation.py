@@ -14,6 +14,31 @@ def _ensure_dir(path: str) -> None:
     if path and not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
 
+def _separation_failure_report(temp_dir: str, sep_result, produced_files) -> str:
+    """Gom lý do thật khi bước tách giọng không ra file nào.
+
+    separate_music chạy tiến trình con và nuốt lỗi vào chuỗi trạng thái (phần tử cuối của
+    giá trị trả về); trước đây chuỗi này bị bỏ nên task chỉ báo 'kiểm tra log console'."""
+    lines = [f"🛑 LỖI: Bước tách giọng không tạo được file vocal nào trong {temp_dir}."]
+
+    status = ""
+    if isinstance(sep_result, (list, tuple)) and sep_result and isinstance(sep_result[-1], str):
+        status = sep_result[-1].strip()
+    if status:
+        lines.append("--- Trạng thái tách nhạc ---")
+        lines.append(status[-1500:])
+
+    if produced_files:
+        lines.append(f"File tách nhạc đã tạo: {sorted(set(produced_files))[:12]}")
+        lines.append("(cần file tên 'Original_Vocals_No_Reverb.wav' — nếu chỉ có "
+                     "'Original_Vocals.wav' thì bước tách reverb đã lỗi)")
+    else:
+        lines.append("Không có file nào được tạo -> tiến trình tách nhạc chết ngay từ đầu. "
+                     "Thường do thiếu model tách nhạc trong assets/models/uvr5 (HP-Vocal-1, MDX-Reverb), "
+                     "file âm thanh không đọc được, hoặc hết VRAM.")
+    lines.append("Xem chi tiết: docker logs --tail 200 vietnamese-rvc-api")
+    return "\n".join(lines)
+
 def _free_gpu_memory():
     """Trả VRAM mà tiến trình server đang giữ (cached allocator) về cho GPU.
 
@@ -160,24 +185,26 @@ def automation_workflow(
             # Optimize: Skip instrumental denoising for training data
             os.environ["SKIP_INST_DENOISE"] = "1"
             
-            separate_music(
+            sep_result = separate_music(
                 drop_audio_files=file_paths,
                 input_path="",
                 output_dirs=os.path.join(stub_dir, "stub"),
                 export_format="wav",
                 model_name="HP-Vocal-1",
                 karaoke_model="", reverb_model="MDX-Reverb", denoise_model="Lite",
-                sample_rate=44100, shifts=2, batch_size=1, overlap=0.25, aggression=10, 
+                sample_rate=44100, shifts=2, batch_size=1, overlap=0.25, aggression=10,
                 hop_length=1024, window_size=512, segments_size=256, post_process_threshold=0.2,
                 enable_tta=False, enable_denoise=True, high_end_process=False, enable_post_process=False,
                 separate_backing=False, separate_reverb=True # Tách reverb để lấy Original_Vocals_No_Reverb
             )
-            
+
             # Gom Vocals vào dataset folder
             os.makedirs(dataset_train_ready, exist_ok=True)
             count_files = 0
+            produced = []
             for root, dirs, files in os.walk(temp_separate_dir):
                 for file in files:
+                    produced.append(file)
                     # Chỉ lấy file Original_Vocals_No_Reverb
                     if "Original_Vocals_No_Reverb" in file and file.endswith(".wav"):
                         # Move and rename unique
@@ -185,15 +212,19 @@ def automation_workflow(
                         dst = os.path.join(dataset_train_ready, f"{count_files}.wav")
                         shutil.move(src, dst)
                         count_files += 1
-            
+
+            if count_files == 0:
+                # Đưa lỗi thật của tiến trình tách nhạc vào log task (trước đây chỉ nằm ở console)
+                yield None, log(_separation_failure_report(temp_separate_dir, sep_result, produced))
+                shutil.rmtree(temp_separate_dir, ignore_errors=True)
+                os.environ["SKIP_INST_DENOISE"] = "0"
+                _free_gpu_memory()
+                return
+
             # Dọn dẹp temp
             shutil.rmtree(temp_separate_dir, ignore_errors=True)
             os.environ["SKIP_INST_DENOISE"] = "0"
             _free_gpu_memory()  # trả VRAM của bước tách nhạc về GPU
-            
-            if count_files == 0:
-                 yield None, log(f"Lỗi: Không tìm thấy file giọng tách được trong {temp_separate_dir}. Vui lòng kiểm tra lại log console.")
-                 return
 
             # Quality Check: Duration (Silence Awareness)
             yield None, log(f"Đang kiểm tra chất lượng dữ liệu train (loại bỏ khoảng lặng)...")
@@ -488,7 +519,7 @@ def train_workflow(training_files, model_name, epochs, force_retrain=False):
 
         os.environ["SKIP_INST_DENOISE"] = "1"
 
-        separate_music(
+        sep_result = separate_music(
             drop_audio_files=file_paths,
             input_path="",
             output_dirs=os.path.join(stub_dir, "stub"),
@@ -503,21 +534,26 @@ def train_workflow(training_files, model_name, epochs, force_retrain=False):
 
         os.makedirs(dataset_train_ready, exist_ok=True)
         count_files = 0
+        produced = []
         for root, dirs, files in os.walk(temp_separate_dir):
             for file in files:
+                produced.append(file)
                 if "Original_Vocals_No_Reverb" in file and file.endswith(".wav"):
                     src = os.path.join(root, file)
                     dst = os.path.join(dataset_train_ready, f"{count_files}.wav")
                     shutil.move(src, dst)
                     count_files += 1
 
+        if count_files == 0:
+            yield None, log(_separation_failure_report(temp_separate_dir, sep_result, produced))
+            shutil.rmtree(temp_separate_dir, ignore_errors=True)
+            os.environ["SKIP_INST_DENOISE"] = "0"
+            _free_gpu_memory()
+            return
+
         shutil.rmtree(temp_separate_dir, ignore_errors=True)
         os.environ["SKIP_INST_DENOISE"] = "0"
         _free_gpu_memory()  # trả VRAM của bước tách nhạc về GPU
-
-        if count_files == 0:
-            yield None, log("Lỗi: Không tìm thấy file giọng tách được. Vui lòng kiểm tra lại file ghi âm.")
-            return
 
         yield None, log("Đang kiểm tra chất lượng dữ liệu train (loại bỏ khoảng lặng)...")
         effective_duration = check_dataset_duration(dataset_train_ready)
