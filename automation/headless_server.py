@@ -1619,6 +1619,19 @@ def download_record(record_id: int):
 # Sau reverse proxy request.base_url thường ra http://... nội bộ -> nên đặt hẳn env này.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
+# Lọc/hiển thị thời gian theo uploaded_at (giờ server lúc NHẬN file, DB chạy UTC) chứ
+# KHÔNG theo created_time do máy thu gửi — đồng hồ nhiều box thu sai lệch cả ngày.
+# Offset giờ địa phương của người xem so với UTC (VN = +7).
+RECORD_TZ_OFFSET_HOURS = int(os.environ.get("RECORD_TZ_OFFSET_HOURS", "7"))
+
+def _parse_local_time(s):
+    """'yyyy-MM-dd HH:mm:ss' (giờ VN) -> datetime UTC để so với uploaded_at. Sai format -> None."""
+    from datetime import timedelta
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S") - timedelta(hours=RECORD_TZ_OFFSET_HOURS)
+    except ValueError:
+        return None
+
 @app.get("/api/shared/audio/paginate")
 def paginate_recorded_audio(
     request: Request,
@@ -1633,12 +1646,14 @@ def paginate_recorded_audio(
     { "data": { "pages", "page", "amount", "data": [ {id, name, created_time, image, url} ] } }
 
     Lọc theo cluster/phòng và khoảng thời gian; startTime/endTime dạng
-    'yyyy-MM-dd HH:mm:ss' (đúng format created_time đang lưu -> so sánh chuỗi được).
+    'yyyy-MM-dd HH:mm:ss' theo giờ VN, so với uploaded_at (giờ server nhận file).
     """
     if not _db_enabled():
         raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
     limit = max(1, min(limit, 10000))
     page = max(1, page)
+
+    from datetime import timedelta
 
     conds, params = [], []
     if idCluster:
@@ -1646,9 +1661,11 @@ def paginate_recorded_audio(
     if roomCode:
         conds.append("room_code = %s"); params.append(roomCode)
     if startTime:
-        conds.append("created_time >= %s"); params.append(startTime)
+        t = _parse_local_time(startTime)
+        if t: conds.append("uploaded_at >= %s"); params.append(t)
     if endTime:
-        conds.append("created_time < %s"); params.append(endTime)
+        t = _parse_local_time(endTime)
+        if t: conds.append("uploaded_at < %s"); params.append(t)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
 
     try:
@@ -1656,9 +1673,9 @@ def paginate_recorded_audio(
             cur.execute(f"SELECT COUNT(*) FROM {RECORD_TABLE} {where}", params)
             amount = cur.fetchone()[0]
             cur.execute(
-                f"SELECT id, name, singer_name, created_time, image_object "
+                f"SELECT id, name, singer_name, uploaded_at, image_object "
                 f"FROM {RECORD_TABLE} {where} "
-                f"ORDER BY created_time DESC, id DESC LIMIT %s OFFSET %s",
+                f"ORDER BY uploaded_at DESC, id DESC LIMIT %s OFFSET %s",
                 params + [limit, (page - 1) * limit])
             rows = cur.fetchall()
     except Exception as e:
@@ -1666,12 +1683,14 @@ def paginate_recorded_audio(
 
     base = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
     items = []
-    for rid, name, singer_name, created_time, image_object in rows:
+    for rid, name, singer_name, uploaded_at, image_object in rows:
+        local_time = ""
+        if uploaded_at:
+            local_time = (uploaded_at + timedelta(hours=RECORD_TZ_OFFSET_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
         items.append({
             "id": str(rid),
             "name": name or singer_name or f"Bản thu {rid}",
-            # DateTime.parse của Dart cần ISO 8601 -> đổi ' ' giữa ngày và giờ thành 'T'
-            "created_time": (created_time or "").replace(" ", "T"),
+            "created_time": local_time,
             "image": f"{base}/api/shared/audio/{rid}/image" if image_object else "",
             "url": f"{base}/api/shared/audio/{rid}/stream",
         })
