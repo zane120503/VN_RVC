@@ -5,7 +5,8 @@ import shutil
 import requests
 import subprocess
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Security, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Optional
@@ -34,6 +35,15 @@ import time
 from typing import Dict, Any
 
 app = FastAPI(title="RVC Headless Automation API")
+
+# CORS: trang player (Flutter web host trên Firebase) gọi API từ origin khác —
+# thiếu header này browser chặn response dù server trả 200.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # =====================================================================================
 # BẢO MẬT: xác thực bằng API key qua header "X-API-Key"
@@ -1600,6 +1610,84 @@ def download_record(record_id: int):
     return _stream_record(_get_record(record_id), as_download=True)
 
 # =====================================================================================
+# API CHO TRANG PLAYER (icool_recorder_player — Flutter web)
+# Giữ nguyên contract của trang cũ cms-crm.icool.com.vn nên KHÔNG yêu cầu X-API-Key
+# (client Retrofit không gửi header). Chỉ đọc: liệt kê + phát audio + ảnh bìa.
+# =====================================================================================
+
+# Domain công khai để build link stream/ảnh trong kết quả paginate.
+# Sau reverse proxy request.base_url thường ra http://... nội bộ -> nên đặt hẳn env này.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+@app.get("/api/shared/audio/paginate")
+def paginate_recorded_audio(
+    request: Request,
+    idCluster: str = "",
+    roomCode: str = "",
+    startTime: str = "",
+    endTime: str = "",
+    limit: int = 100,
+    page: int = 1,
+):
+    """Danh sách bản thu cho trang player — format y hệt API cũ:
+    { "data": { "pages", "page", "amount", "data": [ {id, name, created_time, image, url} ] } }
+
+    Lọc theo cluster/phòng và khoảng thời gian; startTime/endTime dạng
+    'yyyy-MM-dd HH:mm:ss' (đúng format created_time đang lưu -> so sánh chuỗi được).
+    """
+    if not _db_enabled():
+        raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
+    limit = max(1, min(limit, 10000))
+    page = max(1, page)
+
+    conds, params = [], []
+    if idCluster:
+        conds.append("cluster_id = %s"); params.append(idCluster)
+    if roomCode:
+        conds.append("room_code = %s"); params.append(roomCode)
+    if startTime:
+        conds.append("created_time >= %s"); params.append(startTime)
+    if endTime:
+        conds.append("created_time < %s"); params.append(endTime)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {RECORD_TABLE} {where}", params)
+            amount = cur.fetchone()[0]
+            cur.execute(
+                f"SELECT id, name, singer_name, created_time, image_object "
+                f"FROM {RECORD_TABLE} {where} "
+                f"ORDER BY created_time DESC, id DESC LIMIT %s OFFSET %s",
+                params + [limit, (page - 1) * limit])
+            rows = cur.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
+
+    base = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+    items = []
+    for rid, name, singer_name, created_time, image_object in rows:
+        items.append({
+            "id": str(rid),
+            "name": name or singer_name or f"Bản thu {rid}",
+            # DateTime.parse của Dart cần ISO 8601 -> đổi ' ' giữa ngày và giờ thành 'T'
+            "created_time": (created_time or "").replace(" ", "T"),
+            "image": f"{base}/api/shared/audio/{rid}/image" if image_object else "",
+            "url": f"{base}/api/shared/audio/{rid}/stream",
+        })
+    return {"data": {"pages": -(-amount // limit), "page": page, "amount": amount, "data": items}}
+
+@app.get("/api/shared/audio/{record_id}/stream")
+def public_stream_record(record_id: int):
+    """Phát bản thu cho trang player — công khai (chỉ phát, không cần key)."""
+    return _stream_record(_get_record(record_id), as_download=False)
+
+@app.get("/api/shared/audio/{record_id}/image")
+def public_record_image(record_id: int):
+    """Ảnh bìa bản thu cho trang player — công khai."""
+    return _stream_record_image(_get_record(record_id))
+
+# =====================================================================================
 # CHỈNH SỬA BẢN THU BẰNG AI — 1 nút bấm trên 1 bản thu:
 # kiểm tra bài có audio giọng ca sĩ -> train giọng khách (nếu chưa có model) -> đổi giọng
 # =====================================================================================
@@ -1800,10 +1888,7 @@ def song_image(song_id: str):
     return StreamingResponse(resp.iter_content(1 << 16),
                              media_type=resp.headers.get("Content-Type", "image/jpeg"))
 
-@app.get("/records/{record_id}/image", dependencies=[Depends(_flex_api_key)])
-def record_image(record_id: int):
-    """Ảnh bìa của bản ghi âm — gắn được vào <img src="...?api_key=KEY">."""
-    rec = _get_record(record_id)
+def _stream_record_image(rec):
     obj_name = rec.get("image_object")
     if not obj_name:
         raise HTTPException(status_code=404, detail="Bản ghi này không có ảnh bìa.")
@@ -1825,6 +1910,11 @@ def record_image(record_id: int):
             obj.release_conn()
 
     return StreamingResponse(_iter(), media_type=media)
+
+@app.get("/records/{record_id}/image", dependencies=[Depends(_flex_api_key)])
+def record_image(record_id: int):
+    """Ảnh bìa của bản ghi âm — gắn được vào <img src="...?api_key=KEY">."""
+    return _stream_record_image(_get_record(record_id))
 
 @app.get("/health")
 def health_check():

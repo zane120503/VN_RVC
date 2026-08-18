@@ -44,6 +44,8 @@ services:
       - MINIO_SECURE=${MINIO_SECURE:-0}
       # Bảng Postgres lưu thông tin bản ghi âm đã upload
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
+      # Domain công khai để build link stream/ảnh trong /api/shared/audio/paginate
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://idolvoice.karaokeicool.vn}
       # Sau khi upload bản thu -> gọi CMS báo metadata (để trống = tắt)
       - CMS_METADATA_URL=${CMS_METADATA_URL:-https://cms-crm.icool.com.vn/api/files/recordings/metadata}
       # Bảng Postgres lưu danh sách bài đã convert (khách nghe thử rồi tải)
