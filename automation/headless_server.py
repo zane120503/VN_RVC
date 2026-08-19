@@ -1573,17 +1573,47 @@ def _get_record(record_id: int):
             "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4], "image_object": row[5],
             "media_id": row[6], "song_id": row[7]}
 
-def _stream_record(rec, as_download):
+def _stream_record(rec, as_download, range_header=None):
+    """Stream audio từ MinIO có Content-Length + hỗ trợ Range (HTTP 206).
+
+    Thiếu 2 thứ này browser không tính được duration (player hiện số rác) và
+    không tua được — thẻ <audio>/<video> luôn dò duration bằng Range request."""
     obj_name = rec["audio_object"]
     ext = os.path.splitext(obj_name or "")[1].lower() or ".mp3"
     media = _AUDIO_TYPES.get(ext, "audio/mpeg")
     filename = (rec["name"] or f"record_{rec['id']}") + ext
+    client = _get_minio()
     try:
-        client = _get_minio()
-        obj = client.get_object(rec["bucket"], obj_name)
+        total = client.stat_object(rec["bucket"], obj_name).size
     except Exception as e:
-        if "NoSuchKey" in str(e):
+        if "NoSuchKey" in str(e) or "Object does not exist" in str(e):
             raise HTTPException(status_code=410, detail="File không còn trên MinIO.")
+        raise HTTPException(status_code=502, detail=f"Không đọc được file từ MinIO: {e}")
+
+    start, end, status = 0, total - 1, 200
+    headers = {"Accept-Ranges": "bytes"}
+    m = re.match(r"bytes=(\d*)-(\d*)$", (range_header or "").strip())
+    if m and (m.group(1) or m.group(2)):
+        if m.group(1):
+            start = int(m.group(1))
+            if m.group(2):
+                end = min(int(m.group(2)), total - 1)
+        else:  # dạng "bytes=-N": N byte cuối
+            start = max(0, total - int(m.group(2)))
+        if start >= total or start > end:
+            raise HTTPException(status_code=416, detail="Range ngoài kích thước file.",
+                                headers={"Content-Range": f"bytes */{total}"})
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+
+    length = end - start + 1
+    headers["Content-Length"] = str(length)
+    if as_download:
+        headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(filename)
+
+    try:
+        obj = client.get_object(rec["bucket"], obj_name, offset=start, length=length)
+    except Exception as e:
         raise HTTPException(status_code=502, detail=f"Không đọc được file từ MinIO: {e}")
 
     def _iter():
@@ -1594,20 +1624,19 @@ def _stream_record(rec, as_download):
             obj.close()
             obj.release_conn()
 
-    headers = {}
-    if as_download:
-        headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(filename)
-    return StreamingResponse(_iter(), media_type=media, headers=headers)
+    return StreamingResponse(_iter(), status_code=status, media_type=media, headers=headers)
 
 @app.get("/records/{record_id}/stream", dependencies=[Depends(_flex_api_key)])
-def stream_record(record_id: int):
+def stream_record(record_id: int, request: Request):
     """Nghe bản ghi âm đã upload — nhận key qua header hoặc ?api_key= (gắn được vào <audio src>)."""
-    return _stream_record(_get_record(record_id), as_download=False)
+    return _stream_record(_get_record(record_id), as_download=False,
+                          range_header=request.headers.get("range"))
 
 @app.get("/records/{record_id}/download", dependencies=[Depends(_flex_api_key)])
-def download_record(record_id: int):
+def download_record(record_id: int, request: Request):
     """Tải bản ghi âm đã upload về (attachment)."""
-    return _stream_record(_get_record(record_id), as_download=True)
+    return _stream_record(_get_record(record_id), as_download=True,
+                          range_header=request.headers.get("range"))
 
 # =====================================================================================
 # API CHO TRANG PLAYER (icool_recorder_player — Flutter web)
@@ -1697,9 +1726,10 @@ def paginate_recorded_audio(
     return {"data": {"pages": -(-amount // limit), "page": page, "amount": amount, "data": items}}
 
 @app.get("/api/shared/audio/{record_id}/stream")
-def public_stream_record(record_id: int):
+def public_stream_record(record_id: int, request: Request):
     """Phát bản thu cho trang player — công khai (chỉ phát, không cần key)."""
-    return _stream_record(_get_record(record_id), as_download=False)
+    return _stream_record(_get_record(record_id), as_download=False,
+                          range_header=request.headers.get("range"))
 
 @app.get("/api/shared/audio/{record_id}/image")
 def public_record_image(record_id: int):
