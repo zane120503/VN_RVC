@@ -46,6 +46,8 @@ services:
       - RECORD_TABLE=${RECORD_TABLE:-rvc_recorded_files}
       # Domain công khai để build link stream/ảnh trong /api/shared/audio/paginate
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://idolvoice.karaokeicool.vn}
+      # Webhook mặc định nhận kết quả task train/convert (trống = chỉ dùng callback_url theo request)
+      - TASK_CALLBACK_URL=${TASK_CALLBACK_URL:-}
       # Sau khi upload bản thu -> gọi CMS báo metadata (để trống = tắt)
       - CMS_METADATA_URL=${CMS_METADATA_URL:-https://cms-crm.icool.com.vn/api/files/recordings/metadata}
       # Bảng Postgres lưu danh sách bài đã convert (khách nghe thử rồi tải)

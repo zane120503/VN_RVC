@@ -253,6 +253,40 @@ def worker_loop():
             import traceback
             traceback.print_exc()
 
+# Webhook báo kết quả task: URL mặc định qua env, hoặc truyền callback_url theo từng request.
+# Task xong (completed/failed) server POST JSON sang URL này — khỏi phải poll /status.
+TASK_CALLBACK_URL = os.environ.get("TASK_CALLBACK_URL", "").strip()
+
+def _notify_task_done(task_id: str, kind: str, payload: dict):
+    url = (TASKS[task_id].get("callback_url") or TASK_CALLBACK_URL).strip()
+    if not url:
+        return
+    task = TASKS[task_id]
+    base = PUBLIC_BASE_URL or "http://localhost:8000"
+    body = {
+        "event": "task_finished",
+        "task_id": task_id,
+        "kind": kind,
+        "status": task.get("status"),
+        "message": task.get("message"),
+        "record_id": payload.get("record_id"),
+        "customer_id": payload.get("customer_id"),
+        "song_id": payload.get("song_id"),
+        "song_name": payload.get("song_name"),
+        "download_url": f"{base}/download/{task_id}" if task.get("status") == "completed" else None,
+        "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    # Best-effort, thử 3 lần — webhook lỗi không được làm hỏng worker
+    for attempt in range(1, 4):
+        try:
+            r = requests.post(url, json=body, timeout=10)
+            r.raise_for_status()
+            print(f"[Task {task_id}] Đã báo kết quả về webhook ({url}).")
+            return
+        except Exception as e:
+            print(f"[Task {task_id}] Webhook lần {attempt}/3 thất bại: {e}")
+            time.sleep(5)
+
 def run_automation_task(task_id: str, kind: str, payload: dict):
     """Chạy 1 task theo loại: full (train+convert), train (chỉ train), convert (chỉ đổi giọng)."""
     print(f"[Task {task_id}] Processing '{kind}' workflow for model {payload.get('model_name')}")
@@ -356,6 +390,13 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
         TASKS[task_id]["logs"] += f"\n\nERROR:\n{err_trace}"
 
     finally:
+        # Báo kết quả cuối cùng về webhook (nếu có cấu hình) — đặt trong finally để
+        # thành công hay thất bại đều báo, và lỗi webhook không ảnh hưởng dọn dẹp.
+        try:
+            _notify_task_done(task_id, kind, payload)
+        except Exception as e:
+            print(f"[Task {task_id}] Lỗi không ngờ khi gọi webhook: {e}")
+
         # Model trên đĩa chỉ là cache: làm mới hạn (MODEL_CACHE_DAYS tính từ LẦN DÙNG CUỐI)
         if kind in ("convert", "full") and payload.get("model_name"):
             _touch_model(payload["model_name"])
@@ -1814,6 +1855,7 @@ def ai_edit_record(
     epochs: int = Form(150),
     force_retrain: bool = Form(False),
     extra_record_ids: Optional[str] = Form(None),
+    callback_url: Optional[str] = Form(None),
 ):
     """Khách bấm "Chỉnh sửa bản thu AI" trên 1 bản thu — làm trọn gói trong 1 lần gọi:
 
@@ -1877,6 +1919,8 @@ def ai_edit_record(
         "customer_id": cus,
         "record_id": record_id,
         "upload_dir": session_dir,
+        # Task xong (completed/failed) sẽ POST kết quả về đây (không truyền -> TASK_CALLBACK_URL)
+        "callback_url": (callback_url or "").strip(),
     }
     payload = {
         "target_song": target_path,
