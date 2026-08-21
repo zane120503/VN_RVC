@@ -1699,12 +1699,24 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 RECORD_TZ_OFFSET_HOURS = int(os.environ.get("RECORD_TZ_OFFSET_HOURS", "7"))
 
 def _parse_local_time(s):
-    """'yyyy-MM-dd HH:mm:ss' (giờ VN) -> datetime UTC để so với uploaded_at. Sai format -> None."""
-    from datetime import timedelta
+    """'yyyy-MM-dd HH:mm:ss' (giờ VN) -> datetime (giữ nguyên giờ VN). Sai format -> None."""
     try:
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S") - timedelta(hours=RECORD_TZ_OFFSET_HOURS)
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
+
+# Thời điểm của bản thu để lọc/hiển thị (giờ VN):
+# - Ưu tiên created_time (đồng hồ box = LÚC KHÁCH HÁT) — box mất mạng có thể giữ file
+#   tới 7 ngày mới upload được, khi đó uploaded_at lệch xa ngày khách hát.
+# - created_time chỉ được tin khi nằm trong [uploaded_at - 8 ngày, uploaded_at + 1 giờ]
+#   (quy về giờ VN); đồng hồ box sai (có box lệch cả tháng) -> dùng uploaded_at.
+RECORD_TIME_SQL = (
+    "(CASE WHEN created_time ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}} \\d{{2}}:\\d{{2}}:\\d{{2}}$' "
+    "AND created_time::timestamp BETWEEN uploaded_at + interval '{tz} hours' - interval '8 days' "
+    "AND uploaded_at + interval '{tz} hours' + interval '1 hour' "
+    "THEN created_time::timestamp "
+    "ELSE uploaded_at + interval '{tz} hours' END)"
+).format(tz=RECORD_TZ_OFFSET_HOURS)
 
 @app.get("/api/shared/audio/paginate")
 def paginate_recorded_audio(
@@ -1727,8 +1739,6 @@ def paginate_recorded_audio(
     limit = max(1, min(limit, 10000))
     page = max(1, page)
 
-    from datetime import timedelta
-
     conds, params = [], []
     if idCluster:
         conds.append("cluster_id = %s"); params.append(idCluster)
@@ -1736,10 +1746,10 @@ def paginate_recorded_audio(
         conds.append("room_code = %s"); params.append(roomCode)
     if startTime:
         t = _parse_local_time(startTime)
-        if t: conds.append("uploaded_at >= %s"); params.append(t)
+        if t: conds.append(f"{RECORD_TIME_SQL} >= %s"); params.append(t)
     if endTime:
         t = _parse_local_time(endTime)
-        if t: conds.append("uploaded_at < %s"); params.append(t)
+        if t: conds.append(f"{RECORD_TIME_SQL} < %s"); params.append(t)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
 
     try:
@@ -1747,9 +1757,9 @@ def paginate_recorded_audio(
             cur.execute(f"SELECT COUNT(*) FROM {RECORD_TABLE} {where}", params)
             amount = cur.fetchone()[0]
             cur.execute(
-                f"SELECT id, name, singer_name, uploaded_at, image_object "
+                f"SELECT id, name, singer_name, {RECORD_TIME_SQL} AS record_time, image_object "
                 f"FROM {RECORD_TABLE} {where} "
-                f"ORDER BY uploaded_at DESC, id DESC LIMIT %s OFFSET %s",
+                f"ORDER BY record_time DESC, id DESC LIMIT %s OFFSET %s",
                 params + [limit, (page - 1) * limit])
             rows = cur.fetchall()
     except Exception as e:
@@ -1757,10 +1767,8 @@ def paginate_recorded_audio(
 
     base = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
     items = []
-    for rid, name, singer_name, uploaded_at, image_object in rows:
-        local_time = ""
-        if uploaded_at:
-            local_time = (uploaded_at + timedelta(hours=RECORD_TZ_OFFSET_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
+    for rid, name, singer_name, record_time, image_object in rows:
+        local_time = record_time.strftime("%Y-%m-%dT%H:%M:%S") if record_time else ""
         items.append({
             "id": str(rid),
             "name": name or singer_name or f"Bản thu {rid}",
