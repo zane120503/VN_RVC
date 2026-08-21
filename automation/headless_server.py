@@ -255,7 +255,10 @@ def worker_loop():
 
 # Webhook báo kết quả task: URL mặc định qua env, hoặc truyền callback_url theo từng request.
 # Task xong (completed/failed) server POST JSON sang URL này — khỏi phải poll /status.
-TASK_CALLBACK_URL = os.environ.get("TASK_CALLBACK_URL", "").strip()
+TASK_CALLBACK_URL = os.environ.get(
+    "TASK_CALLBACK_URL", "https://crm.icool.com.vn/api/ai-voice/webhook").strip()
+# Key gắn vào header X-API-Key khi gọi webhook (mặc định dùng chung API_KEY của server)
+TASK_CALLBACK_KEY = os.environ.get("TASK_CALLBACK_KEY", "").strip() or API_KEY
 
 def _notify_task_done(task_id: str, kind: str, payload: dict):
     url = (TASKS[task_id].get("callback_url") or TASK_CALLBACK_URL).strip()
@@ -276,10 +279,11 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
         "download_url": f"{base}/download/{task_id}" if task.get("status") == "completed" else None,
         "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    headers = {"X-API-Key": TASK_CALLBACK_KEY} if TASK_CALLBACK_KEY else {}
     # Best-effort, thử 3 lần — webhook lỗi không được làm hỏng worker
     for attempt in range(1, 4):
         try:
-            r = requests.post(url, json=body, timeout=10)
+            r = requests.post(url, json=body, headers=headers, timeout=10)
             r.raise_for_status()
             print(f"[Task {task_id}] Đã báo kết quả về webhook ({url}).")
             return
