@@ -277,7 +277,7 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
         "song_id": payload.get("song_id"),
         "song_name": payload.get("song_name"),
         "download_url": f"{base}/download/{task_id}" if task.get("status") == "completed" else None,
-        "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "finished_at": _now_vn().strftime("%Y-%m-%d %H:%M:%S"),
     }
     headers = {"X-API-Key": TASK_CALLBACK_KEY} if TASK_CALLBACK_KEY else {}
     # Best-effort, thử 3 lần — webhook lỗi không được làm hỏng worker
@@ -1199,8 +1199,13 @@ try:
 except ImportError:
     Minio = None
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
+
+def _now_vn():
+    """Giờ VN — container chạy UTC nên mọi chỗ đặt tên thư mục/giờ mặc định phải +7,
+    nếu không ngày trên MinIO và log lệch 1 ngày so với ngày khách hát (ca sau 17h UTC)."""
+    return datetime.now() + timedelta(hours=RECORD_TZ_OFFSET_HOURS)
 
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "172.16.20.12:9100")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "")
@@ -1280,7 +1285,7 @@ def upload_result_to_minio(path, customer_id):
         client = _get_minio_result()
         object_name = "{}/{}/{}".format(
             _safe_name(customer_id or "unknown"),
-            datetime.now().strftime("%Y-%m-%d"),
+            _now_vn().strftime("%Y-%m-%d"),
             _safe_name(os.path.basename(path)),
         )
         client.fput_object(MINIO_RESULT_BUCKET, object_name, path, content_type="audio/mpeg")
@@ -1513,7 +1518,7 @@ def upload_audio(
 
     client = _get_minio()
 
-    now = datetime.now()
+    now = _now_vn()
     if not created_time:
         created_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
