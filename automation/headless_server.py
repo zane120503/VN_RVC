@@ -277,7 +277,8 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
         "song_id": payload.get("song_id"),
         "song_name": payload.get("song_name"),
         "download_url": f"{base}/download/{task_id}" if task.get("status") == "completed" else None,
-        "finished_at": _now_vn().strftime("%Y-%m-%d %H:%M:%S"),
+        # Giờ UTC — CRM parse thời gian là UTC rồi tự +7 khi hiển thị
+        "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     headers = {"X-API-Key": TASK_CALLBACK_KEY} if TASK_CALLBACK_KEY else {}
     # Best-effort, thử 3 lần — webhook lỗi không được làm hỏng worker
@@ -1248,6 +1249,16 @@ CMS_METADATA_URL = os.environ.get(
 def notify_recording_metadata(payload):
     """Gửi thông tin bản thu vừa upload sang CMS. Best-effort: lỗi chỉ log +
     trả về trong response, KHÔNG làm upload fail (tránh client karaoke re-upload trùng)."""
+    # CRM parse created_time là UTC (lưu ...Z rồi UI +7) -> đổi giờ VN sang UTC trước
+    # khi gửi, nếu không ca hát sau 17h bị CRM hiển thị nhảy sang ngày hôm sau.
+    ct = payload.get("created_time")
+    if ct:
+        try:
+            payload = {**payload, "created_time": (
+                datetime.strptime(ct, "%Y-%m-%d %H:%M:%S")
+                - timedelta(hours=RECORD_TZ_OFFSET_HOURS)).strftime("%Y-%m-%d %H:%M:%S")}
+        except ValueError:
+            pass  # format lạ thì gửi nguyên trạng
     try:
         r = requests.post(CMS_METADATA_URL, json=payload, timeout=10)
         r.raise_for_status()
