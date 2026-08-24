@@ -1521,6 +1521,36 @@ def upload_audio(
     now = _now_vn()
     if not created_time:
         created_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        # Chống upload đúp: box mất mạng/restart giữa chừng sẽ gửi lại cùng bản thu
+        # (cùng phòng + bài + created_time) -> trả về bản đã có, không tạo dòng mới,
+        # không báo CMS lần nữa (tránh đúp bài trên CRM và web).
+        if _db_enabled():
+            try:
+                with _db_conn() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT id, bucket, audio_object FROM {RECORD_TABLE} "
+                        f"WHERE cluster_id IS NOT DISTINCT FROM %s "
+                        f"AND room_code IS NOT DISTINCT FROM %s "
+                        f"AND name IS NOT DISTINCT FROM %s AND created_time = %s LIMIT 1",
+                        (cluster_id, room_code, name, created_time))
+                    dup = cur.fetchone()
+                if dup:
+                    print(f"[UploadAudio] Bỏ qua upload ĐÚP (đã có record_id={dup[0]}): {name} "
+                          f"({cluster_id}/{room_code} {created_time})")
+                    return {
+                        "status": "duplicate_ignored",
+                        "record_id": dup[0],
+                        "bucket": dup[1] or MINIO_BUCKET,
+                        "audio_object": dup[2],
+                        "image_object": None,
+                        "size_mb": 0,
+                        "created_time": created_time,
+                        "metadata_sent": False,
+                        "metadata_error": "bản đúp — đã báo CMS ở lần upload đầu",
+                    }
+            except Exception as e:
+                print(f"⚠️  [UploadAudio] Lỗi kiểm tra đúp (vẫn nhận upload): {e}")
 
     # Tổ chức: {cluster}/{phòng}/{ngày}/{giờ}_{uuid}_{id bài}_{tên file}
     base_dir = "{}/{}/{}".format(
