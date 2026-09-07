@@ -842,17 +842,35 @@ def customer_model_info(customer_id: str):
         "db_record": db_record,
     }
 
+# Đổi giới tính giọng = dịch đúng 1 quãng tám (12 bán âm):
+# - "nam_sang_nu": bài gốc giọng NAM, muốn ra giọng NỮ (model khách là nữ)  -> +12
+# - "nu_sang_nam": bài gốc giọng NỮ, muốn ra giọng NAM (model khách là nam) -> -12
+_GENDER_SHIFT = {"nam_sang_nu": 12, "nu_sang_nam": -12}
+
+def _apply_gender_swap(pitch_shift: int, gender_swap):
+    """pitch_shift truyền tay được ưu tiên; gender_swap chỉ áp khi pitch_shift = 0."""
+    if pitch_shift == 0 and gender_swap:
+        key = str(gender_swap).strip().lower()
+        if key not in _GENDER_SHIFT:
+            raise HTTPException(status_code=400,
+                                detail="gender_swap chỉ nhận 'nam_sang_nu' hoặc 'nu_sang_nam'.")
+        return _GENDER_SHIFT[key]
+    return pitch_shift
+
 @app.post("/convert", dependencies=[Depends(verify_api_key)])
 def convert_with_customer_model(
     customer_id: str = Form(...),
     pitch_shift: int = Form(0),
+    gender_swap: Optional[str] = Form(None),
     target_song_id: Optional[str] = Form(None),
     target_song: Optional[UploadFile] = File(None),
 ):
     """API 2: Đổi giọng bài hát bằng model đã train sẵn của khách hàng.
 
     Bài hát đích: gửi target_song_id (lấy từ hệ thống) HOẶC upload file target_song.
+    Đổi giới tính giọng: gender_swap = 'nam_sang_nu' | 'nu_sang_nam' (= pitch_shift ±12).
     """
+    pitch_shift = _apply_gender_swap(pitch_shift, gender_swap)
     model_name = _model_name_for(customer_id)
 
     # Model không có trên đĩa (vd server mới rebuild) -> tự khôi phục từ MinIO
@@ -1910,6 +1928,7 @@ def ai_edit_record(
     record_id: int,
     customer_id: Optional[str] = Form(None),
     pitch_shift: int = Form(0),
+    gender_swap: Optional[str] = Form(None),
     epochs: int = Form(150),
     force_retrain: bool = Form(False),
     extra_record_ids: Optional[str] = Form(None),
@@ -1924,7 +1943,11 @@ def ai_edit_record(
 
     `customer_id` để trống -> model gắn theo bản thu (`rec{record_id}`); truyền mã khách
     thật thì model dùng lại được cho các bản thu sau, khỏi train lại.
+
+    Đổi giới tính giọng: gender_swap = 'nam_sang_nu' (bài ca sĩ nam -> ra giọng nữ)
+    hoặc 'nu_sang_nam' (bài ca sĩ nữ -> ra giọng nam) — tương đương pitch_shift ±12.
     """
+    pitch_shift = _apply_gender_swap(pitch_shift, gender_swap)
     rec = _get_record(record_id)
 
     song, reason = _record_target_song(rec)
