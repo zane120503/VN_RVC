@@ -845,7 +845,13 @@ def customer_model_info(customer_id: str):
 # Đổi giới tính giọng = dịch đúng 1 quãng tám (12 bán âm):
 # - "nam_sang_nu": bài gốc giọng NAM, muốn ra giọng NỮ (model khách là nữ)  -> +12
 # - "nu_sang_nam": bài gốc giọng NỮ, muốn ra giọng NAM (model khách là nam) -> -12
-_GENDER_SHIFT = {"nam_sang_nu": 12, "nu_sang_nam": -12}
+# UI chỉ có 2 nút Nam/Nữ (giới tính giọng ĐẦU RA) thì gửi thẳng "nam" | "nu";
+# không chọn -> bỏ trống -> giữ nguyên tone.
+_GENDER_SHIFT = {
+    "nam_sang_nu": 12, "nu_sang_nam": -12,
+    "nu": 12, "nữ": 12,   # muốn ra giọng nữ (bài gốc nam)
+    "nam": -12,           # muốn ra giọng nam (bài gốc nữ)
+}
 
 def _apply_gender_swap(pitch_shift: int, gender_swap):
     """pitch_shift truyền tay được ưu tiên; gender_swap chỉ áp khi pitch_shift = 0."""
@@ -853,7 +859,8 @@ def _apply_gender_swap(pitch_shift: int, gender_swap):
         key = str(gender_swap).strip().lower()
         if key not in _GENDER_SHIFT:
             raise HTTPException(status_code=400,
-                                detail="gender_swap chỉ nhận 'nam_sang_nu' hoặc 'nu_sang_nam'.")
+                                detail="gender_swap chỉ nhận 'nam' | 'nu' (giọng đầu ra) "
+                                       "hoặc 'nam_sang_nu' | 'nu_sang_nam'.")
         return _GENDER_SHIFT[key]
     return pitch_shift
 
