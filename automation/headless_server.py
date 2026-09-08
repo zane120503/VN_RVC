@@ -1936,6 +1936,7 @@ def ai_edit_record(
     customer_id: Optional[str] = Form(None),
     pitch_shift: int = Form(0),
     gender_swap: Optional[str] = Form(None),
+    song_id: Optional[str] = Form(None),
     epochs: int = Form(150),
     force_retrain: bool = Form(False),
     extra_record_ids: Optional[str] = Form(None),
@@ -1953,13 +1954,24 @@ def ai_edit_record(
 
     Đổi giới tính giọng: gender_swap = 'nam_sang_nu' (bài ca sĩ nam -> ra giọng nữ)
     hoặc 'nu_sang_nam' (bài ca sĩ nữ -> ra giọng nam) — tương đương pitch_shift ±12.
+
+    `song_id`: chỉ định TAY bài gốc trong ktv_song — dùng khi bản thu là bài YouTube
+    hoặc tên không khớp danh mục nhưng người vận hành biết chính xác bài tương ứng.
     """
     pitch_shift = _apply_gender_swap(pitch_shift, gender_swap)
     rec = _get_record(record_id)
 
-    song, reason = _record_target_song(rec)
-    if not song:
-        raise HTTPException(status_code=409, detail=reason)
+    if song_id and str(song_id).strip().isdigit():
+        song = _check_song_available({"id": str(song_id).strip(), "name": rec.get("name")})
+        if not song:
+            raise HTTPException(status_code=409,
+                                detail=f"Bài id={song_id} chỉ định không có audio giọng ca sĩ "
+                                       f"trên media server (chưa đồng bộ/xuất bản).")
+        song["matched_by"] = "manual"
+    else:
+        song, reason = _record_target_song(rec)
+        if not song:
+            raise HTTPException(status_code=409, detail=reason)
 
     cus = customer_id or f"rec{record_id}"
     model_name = _model_name_for(cus)
