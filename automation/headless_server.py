@@ -363,7 +363,8 @@ def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db
         gain_db = vocal_gain_db
         if gain_db is None:
             vm, im = _mean_db(shifted), _mean_db(instr)
-            gain_db = max(-3.0, min(15.0, (im + 1.0) - vm)) if vm is not None and im is not None else 0.0
+            # mặc định: giọng BẰNG âm lượng beat (mean volume ngang nhau)
+            gain_db = max(-3.0, min(15.0, im - vm)) if vm is not None and im is not None else 0.0
 
         yield None, log(f"Dịch xong. Đang ghép lại với beat gốc (giọng {gain_db:+.1f} dB)...")
         final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}.mp3")
