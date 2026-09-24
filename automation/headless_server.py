@@ -292,10 +292,14 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
             print(f"[Task {task_id}] Webhook lần {attempt}/3 thất bại: {e}")
             time.sleep(5)
 
-def pitch_shift_workflow(input_path, semitones):
+def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0):
     """Đổi tone thuần DSP (không AI, không train): tách giọng khỏi beat -> dịch cao độ
-    RIÊNG phần giọng N bán âm (librosa) -> ghép lại với beat gốc.
-    Nhanh (~1-2 phút, chủ yếu là bước tách); âm sắc vẫn là người hát gốc."""
+    RIÊNG phần giọng N bán âm -> ghép lại với beat gốc.
+
+    formant_ratio != 1.0 -> dùng Praat "Change gender" (parselmouth): dịch pitch VÀ
+    kéo formant độc lập — nam->nữ nghe thuyết phục hơn hẳn pitch trần (nữ formant
+    cao hơn nam ~15-20%%). formant_ratio = 1.0 -> chỉ dịch pitch (librosa) như cũ.
+    Nhanh (~1-2 phút, chủ yếu là bước tách)."""
     logs = []
     def log(msg):
         logs.append(msg)
@@ -330,11 +334,23 @@ def pitch_shift_workflow(input_path, semitones):
             yield None, log("Lỗi: không tìm thấy file tách (Vocal/Instruments).")
             return
 
-        yield None, log(f"Tách xong. Đang dịch giọng {semitones:+d} bán âm (DSP)...")
-        y, sr = librosa.load(vocal, sr=None, mono=True)
-        y2 = librosa.effects.pitch_shift(y=y, sr=sr, n_steps=float(semitones))
         shifted = os.path.join(out_dir, f"Vocals_shift_{semitones:+d}.wav")
-        sf.write(shifted, y2, sr)
+        if abs(formant_ratio - 1.0) > 1e-3:
+            yield None, log(f"Tách xong. Đang dịch {semitones:+d} bán âm + formant x{formant_ratio:.2f} (Praat)...")
+            import parselmouth
+            from parselmouth.praat import call as praat_call
+            snd = parselmouth.Sound(vocal)
+            pitch_obj = praat_call(snd, "To Pitch", 0.0, 75, 600)
+            median = praat_call(pitch_obj, "Get quantile", 0, 0, 0.5, "Hertz")
+            # median không đo được (không có đoạn hát) -> 0 = Praat giữ nguyên cao độ
+            new_median = median * (2 ** (semitones / 12.0)) if median and median > 0 else 0
+            out_snd = praat_call(snd, "Change gender", 75, 600, formant_ratio, new_median, 1.0, 1.0)
+            out_snd.save(shifted, "WAV")
+        else:
+            yield None, log(f"Tách xong. Đang dịch giọng {semitones:+d} bán âm (DSP)...")
+            y, sr = librosa.load(vocal, sr=None, mono=True)
+            y2 = librosa.effects.pitch_shift(y=y, sr=sr, n_steps=float(semitones))
+            sf.write(shifted, y2, sr)
 
         yield None, log("Dịch xong. Đang ghép lại với beat gốc...")
         final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}.mp3")
@@ -382,6 +398,7 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
             generator = pitch_shift_workflow(
                 input_path=payload["target_song"],
                 semitones=payload["pitch_shift"],
+                formant_ratio=payload.get("formant_ratio", 1.0),
             )
         else:  # "full" — quy trình cũ: train + convert trong 1 lần
             generator = automation_workflow(
@@ -1002,19 +1019,26 @@ def convert_with_customer_model(
 @app.post("/pitch_shift", dependencies=[Depends(verify_api_key)])
 def pitch_shift_endpoint(
     semitones: int = Form(...),
+    formant_ratio: float = Form(0.0),
     audio: Optional[UploadFile] = File(None),
     record_id: Optional[int] = Form(None),
     target_song_id: Optional[str] = Form(None),
     callback_url: Optional[str] = Form(None),
 ):
-    """Đổi tone giọng thuần DSP — KHÔNG train model, KHÔNG đổi âm sắc (nhanh 1-3 phút).
+    """Đổi tone giọng thuần DSP — KHÔNG train model (nhanh 1-3 phút).
 
-    Tách giọng khỏi beat -> dịch cao độ riêng phần giọng `semitones` bán âm -> ghép lại.
+    Tách giọng khỏi beat -> dịch cao độ + formant riêng phần giọng -> ghép lại.
     Nguồn audio (chọn 1): upload file `audio` / `record_id` bản thu / `target_song_id` bài danh mục.
-    semitones: -12..12 (khác 0); hướng nữ +6..+12, hướng nam -6..-12.
+    - semitones: -12..12 (khác 0); hướng nữ +5..+7, hướng nam -5..-7.
+    - formant_ratio: 0 (mặc định) = tự chọn theo hướng (+ -> x1.18 nữ, - -> x0.85 nam);
+      1.0 = chỉ dịch pitch không đổi formant; hoặc tự truyền 0.5..2.0.
     """
     if semitones == 0 or not -12 <= semitones <= 12:
         raise HTTPException(status_code=400, detail="semitones phải trong [-12..12] và khác 0.")
+    if formant_ratio == 0:
+        formant_ratio = 1.18 if semitones > 0 else 0.85
+    if not 0.5 <= formant_ratio <= 2.0:
+        raise HTTPException(status_code=400, detail="formant_ratio trong [0.5..2.0] (hoặc 0 = tự chọn).")
 
     session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
     os.makedirs(session_dir, exist_ok=True)
@@ -1055,6 +1079,7 @@ def pitch_shift_endpoint(
     }
     TASK_QUEUE.put((task_id, "pitch", {
         "target_song": input_path, "pitch_shift": semitones,
+        "formant_ratio": formant_ratio,
         "record_id": record_id, "song_name": song_name,
     }))
     q_size = TASK_QUEUE.qsize()
