@@ -292,7 +292,7 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
             print(f"[Task {task_id}] Webhook lần {attempt}/3 thất bại: {e}")
             time.sleep(5)
 
-def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0):
+def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db=None):
     """Đổi tone thuần DSP (không AI, không train): tách giọng khỏi beat -> dịch cao độ
     RIÊNG phần giọng N bán âm -> ghép lại với beat gốc.
 
@@ -352,11 +352,26 @@ def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0):
             y2 = librosa.effects.pitch_shift(y=y, sr=sr, n_steps=float(semitones))
             sf.write(shifted, y2, sr)
 
-        yield None, log("Dịch xong. Đang ghép lại với beat gốc...")
+        # Cân âm lượng giọng với beat: bản thu mic giọng thường chìm hơn beat nhiều dB,
+        # cộng thẳng 2 lớp làm giọng nhỏ. Tự đo mean volume và nâng giọng lên ~beat +1 dB.
+        def _mean_db(path):
+            rr = subprocess.run(["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+                                capture_output=True, text=True, timeout=180)
+            m = re.search(r"mean_volume: (-?[\d.]+) dB", rr.stderr or "")
+            return float(m.group(1)) if m else None
+
+        gain_db = vocal_gain_db
+        if gain_db is None:
+            vm, im = _mean_db(shifted), _mean_db(instr)
+            gain_db = max(-3.0, min(15.0, (im + 1.0) - vm)) if vm is not None and im is not None else 0.0
+
+        yield None, log(f"Dịch xong. Đang ghép lại với beat gốc (giọng {gain_db:+.1f} dB)...")
         final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}.mp3")
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", instr, "-i", shifted, "-filter_complex",
-             "amix=inputs=2:duration=longest:normalize=0", "-b:a", "192k", final_out],
+             f"[1:a]volume={gain_db:.1f}dB[v];[0:a][v]amix=inputs=2:duration=longest:normalize=0,"
+             f"alimiter=limit=0.97:level=false",
+             "-b:a", "192k", final_out],
             capture_output=True, text=True, timeout=300)
         try:
             os.remove(shifted)
@@ -399,6 +414,7 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                 input_path=payload["target_song"],
                 semitones=payload["pitch_shift"],
                 formant_ratio=payload.get("formant_ratio", 1.0),
+                vocal_gain_db=payload.get("vocal_gain_db"),
             )
         else:  # "full" — quy trình cũ: train + convert trong 1 lần
             generator = automation_workflow(
@@ -1020,6 +1036,7 @@ def convert_with_customer_model(
 def pitch_shift_endpoint(
     semitones: int = Form(...),
     formant_ratio: float = Form(0.0),
+    vocal_gain_db: Optional[float] = Form(None),
     audio: Optional[UploadFile] = File(None),
     record_id: Optional[int] = Form(None),
     target_song_id: Optional[str] = Form(None),
@@ -1039,6 +1056,9 @@ def pitch_shift_endpoint(
         formant_ratio = 1.18 if semitones > 0 else 0.85
     if not 0.5 <= formant_ratio <= 2.0:
         raise HTTPException(status_code=400, detail="formant_ratio trong [0.5..2.0] (hoặc 0 = tự chọn).")
+    if vocal_gain_db is not None and not -12.0 <= vocal_gain_db <= 24.0:
+        raise HTTPException(status_code=400,
+                            detail="vocal_gain_db trong [-12..24] dB (bỏ trống = tự cân với beat).")
 
     session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
     os.makedirs(session_dir, exist_ok=True)
@@ -1079,7 +1099,7 @@ def pitch_shift_endpoint(
     }
     TASK_QUEUE.put((task_id, "pitch", {
         "target_song": input_path, "pitch_shift": semitones,
-        "formant_ratio": formant_ratio,
+        "formant_ratio": formant_ratio, "vocal_gain_db": vocal_gain_db,
         "record_id": record_id, "song_name": song_name,
     }))
     q_size = TASK_QUEUE.qsize()
