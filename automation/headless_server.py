@@ -339,7 +339,7 @@ def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0):
             yield None, log(f"Tách xong. Đang dịch {semitones:+d} bán âm + formant x{formant_ratio:.2f} (Praat)...")
             import parselmouth
             from parselmouth.praat import call as praat_call
-            snd = parselmouth.Sound(vocal)
+            snd = parselmouth.Sound(vocal).convert_to_mono()  # Change gender chỉ nhận mono
             pitch_obj = praat_call(snd, "To Pitch", 0.0, 75, 600)
             median = praat_call(pitch_obj, "Get quantile", 0, 0, 0.5, "Hertz")
             # median không đo được (không có đoạn hát) -> 0 = Praat giữ nguyên cao độ
