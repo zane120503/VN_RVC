@@ -292,6 +292,68 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
             print(f"[Task {task_id}] Webhook lần {attempt}/3 thất bại: {e}")
             time.sleep(5)
 
+def pitch_shift_workflow(input_path, semitones):
+    """Đổi tone thuần DSP (không AI, không train): tách giọng khỏi beat -> dịch cao độ
+    RIÊNG phần giọng N bán âm (librosa) -> ghép lại với beat gốc.
+    Nhanh (~1-2 phút, chủ yếu là bước tách); âm sắc vẫn là người hát gốc."""
+    logs = []
+    def log(msg):
+        logs.append(msg)
+        return "\n".join(logs)
+    try:
+        from main.app.core.separate import separate_music
+        import librosa
+        import soundfile as sf
+
+        audios_root = "audios"
+        name = os.path.splitext(os.path.basename(input_path))[0]
+        out_dir = os.path.join(audios_root, name)
+
+        yield None, log(f"Đang tách giọng/beat: {name}...")
+        stub = os.path.join(audios_root, "stub")
+        os.makedirs(stub, exist_ok=True)
+        separate_music(
+            drop_audio_files=input_path, input_path="",
+            output_dirs=os.path.join(stub, "stub"),
+            export_format="mp3", model_name="HP-Vocal-1",
+            karaoke_model="", reverb_model="MDX-Reverb", denoise_model="Lite",
+            sample_rate=44100, shifts=2, batch_size=1, overlap=0.25, aggression=10,
+            hop_length=1024, window_size=512, segments_size=256, post_process_threshold=0.2,
+            enable_tta=False, enable_denoise=True, high_end_process=False, enable_post_process=False,
+            separate_backing=False, separate_reverb=True,
+        )
+        vocal = os.path.join(out_dir, "Original_Vocals_No_Reverb.mp3")
+        if not os.path.exists(vocal):
+            vocal = os.path.join(out_dir, "Original_Vocals.mp3")
+        instr = os.path.join(out_dir, "Instruments.mp3")
+        if not (os.path.exists(vocal) and os.path.exists(instr)):
+            yield None, log("Lỗi: không tìm thấy file tách (Vocal/Instruments).")
+            return
+
+        yield None, log(f"Tách xong. Đang dịch giọng {semitones:+d} bán âm (DSP)...")
+        y, sr = librosa.load(vocal, sr=None, mono=True)
+        y2 = librosa.effects.pitch_shift(y=y, sr=sr, n_steps=float(semitones))
+        shifted = os.path.join(out_dir, f"Vocals_shift_{semitones:+d}.wav")
+        sf.write(shifted, y2, sr)
+
+        yield None, log("Dịch xong. Đang ghép lại với beat gốc...")
+        final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}.mp3")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", instr, "-i", shifted, "-filter_complex",
+             "amix=inputs=2:duration=longest:normalize=0", "-b:a", "192k", final_out],
+            capture_output=True, text=True, timeout=300)
+        try:
+            os.remove(shifted)
+        except OSError:
+            pass
+        if r.returncode != 0 or not os.path.exists(final_out):
+            yield None, log(f"Lỗi ghép beat (ffmpeg): {(r.stderr or '')[-500:]}")
+            return
+        yield final_out, log(f"== HOÀN TẤT! FILE KẾT QUẢ: {final_out} ==")
+    except Exception:
+        import traceback
+        yield None, log(f"LỖI KHÔNG MONG MUỐN:\n{traceback.format_exc()}")
+
 def run_automation_task(task_id: str, kind: str, payload: dict):
     """Chạy 1 task theo loại: full (train+convert), train (chỉ train), convert (chỉ đổi giọng)."""
     print(f"[Task {task_id}] Processing '{kind}' workflow for model {payload.get('model_name')}")
@@ -315,6 +377,11 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                 target_song=payload["target_song"],
                 model_name=payload["model_name"],
                 pitch_shift=payload["pitch_shift"],
+            )
+        elif kind == "pitch":  # đổi tone thuần DSP, không model
+            generator = pitch_shift_workflow(
+                input_path=payload["target_song"],
+                semitones=payload["pitch_shift"],
             )
         else:  # "full" — quy trình cũ: train + convert trong 1 lần
             generator = automation_workflow(
@@ -930,6 +997,72 @@ def convert_with_customer_model(
         "model_name": model_name,
         "message": f"Bắt đầu đổi giọng bằng model của khách (vị trí hàng đợi: {q_size}).",
         "queue_size": q_size,
+    }
+
+@app.post("/pitch_shift", dependencies=[Depends(verify_api_key)])
+def pitch_shift_endpoint(
+    semitones: int = Form(...),
+    audio: Optional[UploadFile] = File(None),
+    record_id: Optional[int] = Form(None),
+    target_song_id: Optional[str] = Form(None),
+    callback_url: Optional[str] = Form(None),
+):
+    """Đổi tone giọng thuần DSP — KHÔNG train model, KHÔNG đổi âm sắc (nhanh 1-3 phút).
+
+    Tách giọng khỏi beat -> dịch cao độ riêng phần giọng `semitones` bán âm -> ghép lại.
+    Nguồn audio (chọn 1): upload file `audio` / `record_id` bản thu / `target_song_id` bài danh mục.
+    semitones: -12..12 (khác 0); hướng nữ +6..+12, hướng nam -6..-12.
+    """
+    if semitones == 0 or not -12 <= semitones <= 12:
+        raise HTTPException(status_code=400, detail="semitones phải trong [-12..12] và khác 0.")
+
+    session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
+    os.makedirs(session_dir, exist_ok=True)
+    song_name = None
+    try:
+        if audio is not None and audio.filename:
+            base, ext = os.path.splitext(os.path.basename(audio.filename))
+            input_path = os.path.join(session_dir, f"{_safe_name(base)}{ext or '.mp3'}")
+            with open(input_path, "wb") as f:
+                shutil.copyfileobj(audio.file, f)
+            song_name = base
+        elif record_id:
+            rec = _get_record(int(record_id))
+            client = _get_minio()
+            input_path = os.path.join(session_dir,
+                                      f"record_{record_id}_{os.path.basename(rec['audio_object'])}")
+            client.fget_object(rec["bucket"], rec["audio_object"], input_path)
+            song_name = rec.get("name")
+        elif target_song_id:
+            input_path = fetch_target_by_id(str(target_song_id), session_dir)
+            song_name = str(target_song_id)
+        else:
+            raise HTTPException(status_code=400,
+                                detail="Cần 1 nguồn audio: file `audio`, `record_id` hoặc `target_song_id`.")
+    except HTTPException:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise
+    except Exception as e:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        raise HTTPException(status_code=502, detail=f"Không lấy được audio nguồn: {e}")
+
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {
+        "status": "queued", "message": "Waiting in queue...", "result_path": None,
+        "logs": "", "created_at": time.time(), "kind": "pitch",
+        "record_id": record_id, "upload_dir": session_dir,
+        "callback_url": (callback_url or "").strip(),
+    }
+    TASK_QUEUE.put((task_id, "pitch", {
+        "target_song": input_path, "pitch_shift": semitones,
+        "record_id": record_id, "song_name": song_name,
+    }))
+    q_size = TASK_QUEUE.qsize()
+    print(f"[PitchShift] Task {task_id} ({semitones:+d} bán âm) cho '{song_name}'. Queue: {q_size}")
+    return {
+        "status": "queued", "task_id": task_id, "semitones": semitones,
+        "song_name": song_name, "queue_size": q_size, "eta_minutes": "1–3",
+        "message": f"Đang tách giọng và dịch {semitones:+d} bán âm (thuần DSP, không train).",
     }
 
 # =====================================================================================
