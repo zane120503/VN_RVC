@@ -1049,13 +1049,14 @@ def pitch_shift_endpoint(
     Tách giọng khỏi beat -> dịch cao độ + formant riêng phần giọng -> ghép lại.
     Nguồn audio (chọn 1): upload file `audio` / `record_id` bản thu / `target_song_id` bài danh mục.
     - semitones: -12..12 (khác 0); hướng nữ +5..+7, hướng nam -5..-7.
-    - formant_ratio: 0 (mặc định) = tự chọn theo hướng (+ -> x1.18 nữ, - -> x0.85 nam);
+    - formant_ratio: 0 (mặc định) = tự chọn theo hướng (+ -> x1.18 nữ, - -> x0.92 nam);
       1.0 = chỉ dịch pitch không đổi formant; hoặc tự truyền 0.5..2.0.
     """
     if semitones == 0 or not -12 <= semitones <= 12:
         raise HTTPException(status_code=400, detail="semitones phải trong [-12..12] và khác 0.")
     if formant_ratio == 0:
-        formant_ratio = 1.18 if semitones > 0 else 0.85
+        # nam dùng x0.92: x0.85 nén formant mạnh làm bản thu mic karaoke bị rè
+        formant_ratio = 1.18 if semitones > 0 else 0.92
     if not 0.5 <= formant_ratio <= 2.0:
         raise HTTPException(status_code=400, detail="formant_ratio trong [0.5..2.0] (hoặc 0 = tự chọn).")
     if vocal_gain_db is not None and not -12.0 <= vocal_gain_db <= 24.0:
