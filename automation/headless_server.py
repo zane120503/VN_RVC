@@ -1940,6 +1940,13 @@ def download_record(record_id: int, request: Request):
 # (client Retrofit không gửi header). Chỉ đọc: liệt kê + phát audio + ảnh bìa.
 # =====================================================================================
 
+# Chi nhánh đổi mã: bản thu cũ mang mã cũ, box cấu hình lại gửi mã mới — tìm 1 mã
+# phải ra cả hai. Khóa viết HOA.
+_CLUSTER_ALIASES = {
+    "IHD65": ["IHD65", "IHD"],
+    "IHD": ["IHD", "IHD65"],
+}
+
 # Domain công khai để build link stream/ảnh trong kết quả paginate.
 # Sau reverse proxy request.base_url thường ra http://... nội bộ -> nên đặt hẳn env này.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
@@ -1992,7 +1999,8 @@ def paginate_recorded_audio(
 
     conds, params = [], []
     if idCluster:
-        conds.append("cluster_id = %s"); params.append(idCluster)
+        codes = _CLUSTER_ALIASES.get(idCluster.upper(), [idCluster])
+        conds.append("cluster_id = ANY(%s)"); params.append(codes)
     if roomCode:
         conds.append("room_code = %s"); params.append(roomCode)
     if startTime:
