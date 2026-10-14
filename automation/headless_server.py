@@ -374,7 +374,8 @@ def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db
             gain_db = max(0.0, min(15.0, im - vm)) if vm is not None and im is not None else 0.0
 
         yield None, log(f"Dịch xong. Đang ghép lại với beat gốc (giọng {gain_db:+.1f} dB)...")
-        final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}.mp3")
+        # tên riêng mỗi task: cùng 1 bản ghi đổi giọng nhiều lần không được ghi đè kết quả của nhau
+        final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}_{uuid.uuid4().hex[:8]}.mp3")
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", instr, "-i", shifted, "-filter_complex",
              f"[1:a]volume={gain_db:.1f}dB[v];[0:a][v]amix=inputs=2:duration=longest:normalize=0,"
