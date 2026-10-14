@@ -292,7 +292,13 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
             print(f"[Task {task_id}] Webhook lần {attempt}/3 thất bại: {e}")
             time.sleep(5)
 
-def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db=None):
+# Model tách giọng/beat cho /pitch_shift. Nhạc lọt vào file giọng sẽ bị dịch tone cùng
+# giọng rồi ghép đè lên beat gốc -> nghe méo, nên model tách sạch quan trọng hơn tốc độ.
+PITCH_SEP_MODEL = os.environ.get("PITCH_SEP_MODEL", "HP-Vocal-1")
+PITCH_SEP_MODELS = ("HP-Vocal-1", "Voc_FT", "Kim_Vocal_2", "Kim_Vocal_1", "HT-Tuned")
+
+def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db=None,
+                         sep_model="HP-Vocal-1"):
     """Đổi tone thuần DSP (không AI, không train): tách giọng khỏi beat -> dịch cao độ
     RIÊNG phần giọng N bán âm -> ghép lại với beat gốc.
 
@@ -313,13 +319,13 @@ def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db
         name = os.path.splitext(os.path.basename(input_path))[0]
         out_dir = os.path.join(audios_root, name)
 
-        yield None, log(f"Đang tách giọng/beat: {name}...")
+        yield None, log(f"Đang tách giọng/beat: {name} (model {sep_model})...")
         stub = os.path.join(audios_root, "stub")
         os.makedirs(stub, exist_ok=True)
         separate_music(
             drop_audio_files=input_path, input_path="",
             output_dirs=os.path.join(stub, "stub"),
-            export_format="mp3", model_name="HP-Vocal-1",
+            export_format="mp3", model_name=sep_model,
             karaoke_model="", reverb_model="MDX-Reverb", denoise_model="Lite",
             sample_rate=44100, shifts=2, batch_size=1, overlap=0.25, aggression=10,
             hop_length=1024, window_size=512, segments_size=256, post_process_threshold=0.2,
@@ -417,6 +423,7 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                 semitones=payload["pitch_shift"],
                 formant_ratio=payload.get("formant_ratio", 1.0),
                 vocal_gain_db=payload.get("vocal_gain_db"),
+                sep_model=payload.get("sep_model") or PITCH_SEP_MODEL,
             )
         else:  # "full" — quy trình cũ: train + convert trong 1 lần
             generator = automation_workflow(
@@ -1039,6 +1046,7 @@ def pitch_shift_endpoint(
     semitones: int = Form(...),
     formant_ratio: float = Form(0.0),
     vocal_gain_db: Optional[float] = Form(None),
+    sep_model: Optional[str] = Form(None),
     audio: Optional[UploadFile] = File(None),
     record_id: Optional[int] = Form(None),
     target_song_id: Optional[str] = Form(None),
@@ -1062,6 +1070,9 @@ def pitch_shift_endpoint(
     if vocal_gain_db is not None and not -12.0 <= vocal_gain_db <= 24.0:
         raise HTTPException(status_code=400,
                             detail="vocal_gain_db trong [-12..24] dB (bỏ trống = tự cân với beat).")
+    if sep_model and sep_model not in PITCH_SEP_MODELS:
+        raise HTTPException(status_code=400,
+                            detail=f"sep_model chỉ nhận: {', '.join(PITCH_SEP_MODELS)} (bỏ trống = mặc định).")
 
     session_dir = os.path.join(UPLOAD_DIR, str(uuid.uuid4())[:8])
     os.makedirs(session_dir, exist_ok=True)
@@ -1103,6 +1114,7 @@ def pitch_shift_endpoint(
     TASK_QUEUE.put((task_id, "pitch", {
         "target_song": input_path, "pitch_shift": semitones,
         "formant_ratio": formant_ratio, "vocal_gain_db": vocal_gain_db,
+        "sep_model": sep_model,
         "record_id": record_id, "song_name": song_name,
     }))
     q_size = TASK_QUEUE.qsize()
