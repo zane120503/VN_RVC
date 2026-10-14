@@ -1044,6 +1044,7 @@ def convert_with_customer_model(
 
 @app.post("/pitch_shift", dependencies=[Depends(verify_api_key)])
 def pitch_shift_endpoint(
+    request: Request,
     semitones: int = Form(...),
     formant_ratio: float = Form(0.0),
     vocal_gain_db: Optional[float] = Form(None),
@@ -1120,6 +1121,11 @@ def pitch_shift_endpoint(
     }))
     q_size = TASK_QUEUE.qsize()
     print(f"[PitchShift] Task {task_id} ({semitones:+d} bán âm) cho '{song_name}'. Queue: {q_size}")
+    # Ai gọi: IP thật (sau reverse proxy) + User-Agent — phân biệt app điện thoại với backend CRM
+    # khi đối soát webhook bị CRM trả "không tìm thấy tác vụ".
+    print(f"[PitchShift] Task {task_id} caller: ip={request.headers.get('x-real-ip') or request.client.host} "
+          f"fwd={request.headers.get('x-forwarded-for', '-')} "
+          f"ua={request.headers.get('user-agent', '-')[:120]} record_id={record_id}")
     return {
         "status": "queued", "task_id": task_id, "semitones": semitones,
         "song_name": song_name, "queue_size": q_size, "eta_minutes": "1–3",
