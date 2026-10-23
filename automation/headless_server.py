@@ -294,11 +294,11 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
 
 # Model tách giọng/beat cho /pitch_shift. Nhạc lọt vào file giọng sẽ bị dịch tone cùng
 # giọng rồi ghép đè lên beat gốc -> nghe méo, nên model tách sạch quan trọng hơn tốc độ.
-PITCH_SEP_MODEL = os.environ.get("PITCH_SEP_MODEL", "Kim_Vocal_2")
+PITCH_SEP_MODEL = os.environ.get("PITCH_SEP_MODEL", "Kim_Vocal_1")
 PITCH_SEP_MODELS = ("HP-Vocal-1", "Voc_FT", "Kim_Vocal_2", "Kim_Vocal_1", "HT-Tuned")
 
 def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db=None,
-                         sep_model="Kim_Vocal_2"):
+                         sep_model="Kim_Vocal_1"):
     """Đổi tone thuần DSP (không AI, không train): tách giọng khỏi beat -> dịch cao độ
     RIÊNG phần giọng N bán âm -> ghép lại với beat gốc.
 
