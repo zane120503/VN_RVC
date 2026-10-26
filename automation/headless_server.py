@@ -294,11 +294,14 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
 
 # Model tách giọng/beat cho /pitch_shift. Nhạc lọt vào file giọng sẽ bị dịch tone cùng
 # giọng rồi ghép đè lên beat gốc -> nghe méo, nên model tách sạch quan trọng hơn tốc độ.
-PITCH_SEP_MODEL = os.environ.get("PITCH_SEP_MODEL", "Kim_Vocal_1")
+PITCH_SEP_MODEL = os.environ.get("PITCH_SEP_MODEL", "HT-Tuned")
 PITCH_SEP_MODELS = ("HP-Vocal-1", "Voc_FT", "Kim_Vocal_2", "Kim_Vocal_1", "HT-Tuned")
+# Bản thu mic karaoke rất nhỏ (~-33 LUFS) -> chuẩn hóa độ to bản ghép về mức nhạc phổ thông.
+# 0 = tắt, chỉ chặn đỉnh như cũ.
+PITCH_TARGET_LUFS = float(os.environ.get("PITCH_TARGET_LUFS", "-14") or 0)
 
 def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db=None,
-                         sep_model="Kim_Vocal_1"):
+                         sep_model="HT-Tuned"):
     """Đổi tone thuần DSP (không AI, không train): tách giọng khỏi beat -> dịch cao độ
     RIÊNG phần giọng N bán âm -> ghép lại với beat gốc.
 
@@ -376,10 +379,13 @@ def pitch_shift_workflow(input_path, semitones, formant_ratio=1.0, vocal_gain_db
         yield None, log(f"Dịch xong. Đang ghép lại với beat gốc (giọng {gain_db:+.1f} dB)...")
         # tên riêng mỗi task: cùng 1 bản ghi đổi giọng nhiều lần không được ghi đè kết quả của nhau
         final_out = os.path.join(audios_root, f"{name}_PITCH{semitones:+d}_{uuid.uuid4().hex[:8]}.mp3")
+        # loudnorm tự xuất 192kHz -> resample lại 44.1k
+        master = (f"loudnorm=I={PITCH_TARGET_LUFS:.1f}:TP=-1.5:LRA=11,aresample=44100"
+                  if PITCH_TARGET_LUFS else "alimiter=limit=0.97:level=false")
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", instr, "-i", shifted, "-filter_complex",
              f"[1:a]volume={gain_db:.1f}dB[v];[0:a][v]amix=inputs=2:duration=longest:normalize=0,"
-             f"alimiter=limit=0.97:level=false",
+             f"{master}",
              "-b:a", "192k", final_out],
             capture_output=True, text=True, timeout=300)
         try:
