@@ -139,12 +139,22 @@ class Separator:
         response.raise_for_status()
         model_downloads_list = response.json()
 
+        demucs_list = {key: value for key, value in model_downloads_list["demucs_download_list"].items() if key.startswith("Demucs v4")}
+        if not demucs_list:
+            # Upstream đổi json sang 1 file .pth gộp (code này chưa đọc được) -> dùng bộ yaml + .th cũ, vẫn còn trên HF
+            demucs_list = {
+                "Demucs v4: htdemucs_ft": {f: f for f in ("f7e0c4bc-ba3fe64a.th", "d12395a8-e57c48e6.th", "92cfc3b6-ef3bcb9c.th", "04573f0d-f3cf25b2.th", "htdemucs_ft.yaml")},
+                "Demucs v4: htdemucs": {f: f for f in ("955717e8-8726e21a.th", "htdemucs.yaml")},
+                "Demucs v4: htdemucs_6s": {f: f for f in ("5c90dfd2-34c22ccb.th", "htdemucs_6s.yaml")},
+                "Demucs v4: hdemucs_mmi": {f: f for f in ("75fc33f5-1941ce65.th", "hdemucs_mmi.yaml")},
+            }
+
         return {
             "MDX": {
                 **model_downloads_list["mdx_download_list"], 
                 **model_downloads_list["mdx_download_vip_list"]
             }, 
-            "Demucs": {key: value for key, value in model_downloads_list["demucs_download_list"].items() if key.startswith("Demucs v4")},
+            "Demucs": demucs_list,
             "VR": {
                 **model_downloads_list["vr_download_list"]
             }
