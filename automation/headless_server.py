@@ -280,6 +280,8 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
         # Giờ UTC — CRM parse thời gian là UTC rồi tự +7 khi hiển thị
         "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # Field riêng theo nguồn tạo task (vd đổi giọng từ phòng hát: kind/gender/cluster_id/room_code)
+    body.update(task.get("webhook_extra") or {})
     headers = {"X-API-Key": TASK_CALLBACK_KEY} if TASK_CALLBACK_KEY else {}
     # Best-effort, thử 3 lần — webhook lỗi không được làm hỏng worker
     for attempt in range(1, 4):
@@ -1883,7 +1885,7 @@ def _get_record(record_id: int):
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, name, singer_name, bucket, audio_object, image_object, "
-                f"media_id, song_id "
+                f"media_id, song_id, cluster_id, room_code "
                 f"FROM {RECORD_TABLE} WHERE id = %s",
                 (record_id,))
             row = cur.fetchone()
@@ -1893,7 +1895,7 @@ def _get_record(record_id: int):
         raise HTTPException(status_code=404, detail="Không tìm thấy bản ghi âm.")
     return {"id": row[0], "name": row[1], "singer_name": row[2],
             "bucket": row[3] or MINIO_BUCKET, "audio_object": row[4], "image_object": row[5],
-            "media_id": row[6], "song_id": row[7]}
+            "media_id": row[6], "song_id": row[7], "cluster_id": row[8], "room_code": row[9]}
 
 def _stream_record(rec, as_download, range_header=None):
     """Stream audio từ MinIO có Content-Length + hỗ trợ Range (HTTP 206).
@@ -2068,6 +2070,53 @@ def public_stream_record(record_id: int, request: Request):
     """Phát bản thu cho trang player — công khai (chỉ phát, không cần key)."""
     return _stream_record(_get_record(record_id), as_download=False,
                           range_header=request.headers.get("range"))
+
+# ---- Đổi giọng nam/nữ từ phòng hát (tablet -> máy phòng -> đây) ----
+# Công khai như /api/files/upload/audio vì máy phòng không giữ API key; chỉ cho đúng 2 lựa chọn
+# gender, và task chỉ tra/tải được khi biết task_id (uuid). Bản đổi giọng là pitch_shift ∓12 bán âm.
+ROOM_VOICE_SWAP_SEMITONES = {"nam": -12, "nu": 12}
+
+@app.post("/api/shared/audio/{record_id}/voice_swap")
+def public_voice_swap(record_id: int, request: Request, gender: str = Form(...)):
+    semitones = ROOM_VOICE_SWAP_SEMITONES.get(gender)
+    if semitones is None:
+        raise HTTPException(status_code=400, detail="gender chỉ nhận: nam, nu")
+    # Bấm lại khi bản cũ còn đang chạy -> trả lại đúng task đó, không xếp thêm
+    for tid, t in list(TASKS.items()):
+        extra = t.get("webhook_extra") or {}
+        if (extra.get("kind") == "room_voice_swap" and t.get("record_id") == record_id
+                and extra.get("gender") == gender and t.get("status") in ("queued", "running")):
+            return {"status": t["status"], "task_id": tid, "gender": gender}
+    rec = _get_record(record_id)
+    res = pitch_shift_endpoint(request, semitones=semitones, formant_ratio=0.0, vocal_gain_db=None,
+                               sep_model=None, audio=None, record_id=record_id,
+                               target_song_id=None, callback_url=None)
+    TASKS[res["task_id"]]["webhook_extra"] = {
+        "kind": "room_voice_swap", "gender": gender, "semitones": semitones,
+        "song_id": rec.get("song_id"), "song_name": rec.get("name"),
+        "cluster_id": rec.get("cluster_id"), "room_code": rec.get("room_code"),
+    }
+    return {"status": res["status"], "task_id": res["task_id"], "gender": gender,
+            "queue_size": res["queue_size"], "eta_minutes": res["eta_minutes"]}
+
+def _room_swap_task(task_id: str):
+    t = TASKS.get(task_id)
+    if not t or (t.get("webhook_extra") or {}).get("kind") != "room_voice_swap":
+        raise HTTPException(status_code=404, detail="Task not found")
+    return t
+
+@app.get("/api/shared/voice_swap/{task_id}")
+def public_voice_swap_status(task_id: str):
+    t = _room_swap_task(task_id)
+    return {"task_id": task_id, "status": t.get("status"), "message": t.get("message")}
+
+@app.get("/api/shared/voice_swap/{task_id}/download")
+def public_voice_swap_download(task_id: str):
+    t = _room_swap_task(task_id)
+    path = t.get("result_path")
+    if t.get("status") != "completed" or not path or not os.path.exists(path):
+        raise HTTPException(status_code=409, detail=f"Task chưa xong: {t.get('status')}")
+    return FileResponse(path=path, filename=os.path.basename(path), media_type="audio/mpeg")
 
 @app.get("/api/shared/audio/{record_id}/image")
 def public_record_image(record_id: int):
