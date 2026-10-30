@@ -500,6 +500,23 @@ def run_automation_task(task_id: str, kind: str, payload: dict):
                     result_object=result_object,
                     record_id=payload.get("record_id"),
                 )
+
+            # Đổi tone từ 1 bản thu (vd đổi giọng nam/nữ tại phòng) -> cũng lưu kèm record_id,
+            # để trang nghe lại bản thu hiện bản đổi giọng ngay dưới bản gốc
+            if kind == "pitch" and payload.get("record_id"):
+                extra = TASKS[task_id].get("webhook_extra") or {}
+                cus = f"rec{payload['record_id']}"
+                save_converted_song(
+                    task_id=task_id,
+                    customer_id=cus,
+                    model_name=f"voice_swap_{extra['gender']}" if extra.get("gender") else "pitch_shift",
+                    song_id=extra.get("song_id"),
+                    song_name=payload.get("song_name"),
+                    pitch_shift=payload.get("pitch_shift"),
+                    result_path=final_output,
+                    result_object=upload_result_to_minio(final_output, cus),
+                    record_id=payload["record_id"],
+                )
         else:
             TASKS[task_id]["status"] = "failed"
             TASKS[task_id]["message"] = "Workflow completed but no output file generated."
@@ -1309,7 +1326,7 @@ def _get_conversion(conversion_id: int):
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, customer_id, song_id, song_name, pitch_shift, result_path, "
-                f"result_object, file_size, created_at "
+                f"result_object, file_size, created_at, record_id "
                 f"FROM {CONVERT_TABLE} WHERE id = %s", (conversion_id,))
             row = cur.fetchone()
     except Exception as e:
@@ -1319,7 +1336,7 @@ def _get_conversion(conversion_id: int):
     return {
         "id": row[0], "customer_id": row[1], "song_id": row[2], "song_name": row[3],
         "pitch_shift": row[4], "result_path": row[5], "result_object": row[6],
-        "file_size": row[7], "created_at": str(row[8]),
+        "file_size": row[7], "created_at": str(row[8]), "record_id": row[9],
     }
 
 def _serve_conversion(conv, as_download: bool):
@@ -2004,6 +2021,45 @@ RECORD_TIME_SQL = (
     "ELSE uploaded_at + interval '{tz} hours' END)"
 ).format(tz=RECORD_TZ_OFFSET_HOURS)
 
+def _record_conversions(record_ids):
+    """Bản AI (đổi giọng nam/nữ, chỉnh sửa AI) đã lưu của các bản thu -> {record_id: [(id, nhãn, giờ VN)]}.
+    Chỉ lấy bản có trên MinIO; lỗi DB thì bỏ qua (danh sách bản gốc vẫn hiện)."""
+    if not record_ids:
+        return {}
+    try:
+        with _db_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, record_id, model_name, pitch_shift, created_at FROM {CONVERT_TABLE} "
+                f"WHERE record_id = ANY(%s) AND result_object IS NOT NULL ORDER BY id",
+                (list(record_ids),))
+            rows = cur.fetchall()
+    except Exception as e:
+        print(f"[Paginate] Lỗi lấy bản AI của bản thu: {e}")
+        return {}
+    out = {}
+    for cid, rid, model_name, pitch, created_at in rows:
+        if (model_name or "").startswith(("voice_swap_", "pitch_shift")) and pitch:
+            label = "Giọng nam AI" if pitch < 0 else "Giọng nữ AI"
+        else:
+            label = "Bản chỉnh sửa AI"
+        # created_at là giờ DB (UTC) -> giờ VN như bản thu
+        local = (created_at + timedelta(hours=RECORD_TZ_OFFSET_HOURS)).strftime("%Y-%m-%dT%H:%M:%S") \
+            if created_at else ""
+        out.setdefault(rid, []).append((cid, label, local))
+    return out
+
+@app.get("/api/shared/conversion/{conversion_id}/stream")
+def public_stream_conversion(conversion_id: int, request: Request):
+    """Phát bản AI của một bản thu cho trang player — công khai như bản thu gốc.
+    Chỉ bản gắn với bản thu (record_id); bản convert riêng của CRM vẫn phải qua API key."""
+    conv = _get_conversion(conversion_id)
+    if not conv.get("record_id") or not conv.get("result_object"):
+        raise HTTPException(status_code=404, detail="Không tìm thấy bản đổi giọng.")
+    # Stream từ MinIO có Range như bản thu -> trình duyệt tính được thời lượng và tua được
+    return _stream_record({"id": conv["id"], "name": conv["song_name"], "bucket": MINIO_RESULT_BUCKET,
+                           "audio_object": conv["result_object"]},
+                          as_download=False, range_header=request.headers.get("range"))
+
 @app.get("/api/shared/audio/paginate")
 def paginate_recorded_audio(
     request: Request,
@@ -2053,16 +2109,28 @@ def paginate_recorded_audio(
         raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
 
     base = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+    convs = _record_conversions([r[0] for r in rows])
     items = []
     for rid, name, singer_name, record_time, image_object in rows:
         local_time = record_time.strftime("%Y-%m-%dT%H:%M:%S") if record_time else ""
+        title = name or singer_name or f"Bản thu {rid}"
+        image = f"{base}/api/shared/audio/{rid}/image" if image_object else ""
         items.append({
             "id": str(rid),
-            "name": name or singer_name or f"Bản thu {rid}",
+            "name": title,
             "created_time": local_time,
-            "image": f"{base}/api/shared/audio/{rid}/image" if image_object else "",
+            "image": image,
             "url": f"{base}/api/shared/audio/{rid}/stream",
         })
+        # Bản đổi giọng AI của bản thu này nằm ngay dưới bản gốc
+        for cid, label, conv_time in convs.get(rid, []):
+            items.append({
+                "id": f"{rid}_ai{cid}",
+                "name": f"{title} · {label}",
+                "created_time": conv_time,
+                "image": image,
+                "url": f"{base}/api/shared/conversion/{cid}/stream",
+            })
     return {"data": {"pages": -(-amount // limit), "page": page, "amount": amount, "data": items}}
 
 @app.get("/api/shared/audio/{record_id}/stream")
