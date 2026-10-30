@@ -77,10 +77,54 @@ class AutomationRequest(BaseModel):
 TASKS: Dict[str, Dict[str, Any]] = {}
 
 import queue
+import heapq
+import itertools
 
-# Global Queue for sequential processing.
-# Item: (task_id, kind, payload) — kind: "full" | "train" | "convert"
-TASK_QUEUE = queue.Queue()
+PRIORITY_HIGH = 0     # đổi giọng tại phòng: khách đang ngồi chờ, task ngắn (~2 phút)
+PRIORITY_NORMAL = 1   # còn lại (CRM: train/convert/pitch — có thể hàng chục phút)
+
+class _TaskQueue:
+    """Hàng đợi task có ưu tiên — 1 worker xử lý lần lượt.
+    Mức ưu tiên nhỏ chạy trước; cùng mức thì vào trước ra trước (seq tăng dần).
+    Item: (task_id, kind, payload) — kind: "full" | "train" | "convert" | "pitch"."""
+
+    def __init__(self):
+        self._q = queue.PriorityQueue()
+        self._seq = itertools.count()
+
+    def put(self, item, priority=PRIORITY_NORMAL):
+        self._q.put((priority, next(self._seq), item))
+
+    def get(self):
+        return self._q.get()[2]
+
+    def task_done(self):
+        self._q.task_done()
+
+    def qsize(self):
+        return self._q.qsize()
+
+    def promote(self, task_id, priority=PRIORITY_HIGH):
+        """Nâng ưu tiên task còn đang chờ (worker chưa lấy). Trả True nếu nâng được."""
+        with self._q.mutex:
+            heap = self._q.queue
+            for i, (p, seq, item) in enumerate(heap):
+                if item[0] == task_id and p > priority:
+                    heap[i] = (priority, seq, item)
+                    heapq.heapify(heap)
+                    return True
+        return False
+
+    def position(self, task_id):
+        """Thứ tự (1 = chạy tiếp theo) của task đang chờ; None nếu không còn trong hàng."""
+        with self._q.mutex:
+            waiting = sorted(self._q.queue, key=lambda e: (e[0], e[1]))
+        for i, (_, _, item) in enumerate(waiting):
+            if item[0] == task_id:
+                return i + 1
+        return None
+
+TASK_QUEUE = _TaskQueue()
 
 # =====================================================================================
 # DB ĐĂNG KÝ MODEL THEO KHÁCH HÀNG (Postgres, cấu hình qua .env)
@@ -2155,7 +2199,8 @@ def public_voice_swap(record_id: int, request: Request, gender: str = Form(...))
         extra = t.get("webhook_extra") or {}
         if (extra.get("kind") == "room_voice_swap" and t.get("record_id") == record_id
                 and extra.get("gender") == gender and t.get("status") in ("queued", "running")):
-            return {"status": t["status"], "task_id": tid, "gender": gender}
+            return {"status": t["status"], "task_id": tid, "gender": gender,
+                    "queue_position": TASK_QUEUE.position(tid)}
     rec = _get_record(record_id)
     res = pitch_shift_endpoint(request, semitones=semitones, formant_ratio=0.0, vocal_gain_db=None,
                                sep_model=None, audio=None, record_id=record_id,
@@ -2165,8 +2210,11 @@ def public_voice_swap(record_id: int, request: Request, gender: str = Form(...))
         "song_id": rec.get("song_id"), "song_name": rec.get("name"),
         "cluster_id": rec.get("cluster_id"), "room_code": rec.get("room_code"),
     }
+    # Khách đang ngồi chờ ở phòng -> chen trước các task CRM (train có thể hàng chục phút)
+    TASK_QUEUE.promote(res["task_id"], PRIORITY_HIGH)
     return {"status": res["status"], "task_id": res["task_id"], "gender": gender,
-            "queue_size": res["queue_size"], "eta_minutes": res["eta_minutes"]}
+            "queue_size": res["queue_size"], "eta_minutes": res["eta_minutes"],
+            "queue_position": TASK_QUEUE.position(res["task_id"])}
 
 def _room_swap_task(task_id: str):
     t = TASKS.get(task_id)
@@ -2177,7 +2225,9 @@ def _room_swap_task(task_id: str):
 @app.get("/api/shared/voice_swap/{task_id}")
 def public_voice_swap_status(task_id: str):
     t = _room_swap_task(task_id)
-    return {"task_id": task_id, "status": t.get("status"), "message": t.get("message")}
+    # queue_position: thứ tự trong hàng chờ (1 = chạy tiếp theo) — chỉ có khi status=queued
+    return {"task_id": task_id, "status": t.get("status"), "message": t.get("message"),
+            "queue_position": TASK_QUEUE.position(task_id) if t.get("status") == "queued" else None}
 
 @app.get("/api/shared/voice_swap/{task_id}/download")
 def public_voice_swap_download(task_id: str):
