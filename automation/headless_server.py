@@ -298,7 +298,7 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
 # giọng rồi ghép đè lên beat gốc -> nghe méo, nên model tách sạch quan trọng hơn tốc độ.
 PITCH_SEP_MODEL = os.environ.get("PITCH_SEP_MODEL", "HT-Tuned")
 PITCH_SEP_MODELS = ("HP-Vocal-1", "Voc_FT", "Kim_Vocal_2", "Kim_Vocal_1", "HT-Tuned")
-# Chuẩn hóa độ to bản ghép (loudnorm, nâng hoặc hạ). Máy phòng từ 2.3.8 tự nâng bản thu lên
+# Chuẩn hóa độ to bản ghép (loudnorm, nâng hoặc hạ). Máy phòng (bản 2.3.7 có AudioNormalizer) tự nâng bản thu lên
 # ~-19 LUFS lúc thu xong (AudioNormalizer) -> để bản đổi giọng cùng mức, phát nối tiếp bản gốc
 # không bị chênh. Bản thu từ máy phòng cũ (nhỏ hơn) cũng được kéo về mức này. 0 = tắt, chỉ chặn đỉnh.
 PITCH_TARGET_LUFS = float(os.environ.get("PITCH_TARGET_LUFS", "-19") or 0)
