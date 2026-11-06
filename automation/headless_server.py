@@ -698,8 +698,15 @@ def run_automation(request: AutomationRequest):
 def get_task_status(task_id: str):
     """Returns the current status and logs of a task."""
     if task_id not in TASKS:
-        raise HTTPException(status_code=404, detail="Task ID not found")
-    
+        # TASKS chỉ nằm trong RAM: restart server là mất -> tra bản đã lưu trong DB
+        try:
+            conv = _get_conversion(task_id=task_id)
+        except HTTPException:
+            raise HTTPException(status_code=404, detail="Task ID not found")
+        return {"task_id": task_id, "status": "completed", "conversion_id": conv["id"],
+                "record_id": conv["record_id"], "song_name": conv["song_name"],
+                "created_at": conv["created_at"]}
+
     return {
         "task_id": task_id,
         **TASKS[task_id]
@@ -711,17 +718,25 @@ from fastapi.responses import FileResponse, StreamingResponse
 def download_result(task_id: str):
     """Downloads the final result file if the task is completed."""
     if task_id not in TASKS:
-        raise HTTPException(status_code=404, detail="Task ID not found")
-    
+        # Task cũ (server đã restart): lấy file theo bản lưu trong DB — local hoặc MinIO
+        try:
+            conv = _get_conversion(task_id=task_id)
+        except HTTPException:
+            raise HTTPException(status_code=404, detail="Task ID not found")
+        return _serve_conversion(conv, as_download=True)
+
     task = TASKS[task_id]
-    
+
     if task["status"] != "completed":
         raise HTTPException(status_code=400, detail=f"Task is not completed. Current status: {task['status']}")
-        
+
     result_path = task.get("result_path")
-    
+
     if not result_path or not os.path.exists(result_path):
-        raise HTTPException(status_code=404, detail="Result file not found on server.")
+        try:
+            return _serve_conversion(_get_conversion(task_id=task_id), as_download=True)
+        except HTTPException:
+            raise HTTPException(status_code=404, detail="Result file not found on server.")
         
     return FileResponse(
         path=result_path, 
@@ -1364,15 +1379,17 @@ def _flex_api_key(key: str = Security(api_key_header), api_key: Optional[str] = 
 _AUDIO_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
                 ".m4a": "audio/mp4", ".ogg": "audio/ogg"}
 
-def _get_conversion(conversion_id: int):
+def _get_conversion(conversion_id: int = None, task_id: str = None):
+    """Lấy 1 bản convert theo id, hoặc theo task_id (task đã rơi khỏi TASKS sau khi restart server)."""
     if not _db_enabled():
         raise HTTPException(status_code=503, detail="DB chưa được cấu hình trên server.")
+    col, val = ("task_id", task_id) if task_id is not None else ("id", conversion_id)
     try:
         with _db_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, customer_id, song_id, song_name, pitch_shift, result_path, "
                 f"result_object, file_size, created_at, record_id "
-                f"FROM {CONVERT_TABLE} WHERE id = %s", (conversion_id,))
+                f"FROM {CONVERT_TABLE} WHERE {col} = %s ORDER BY id DESC LIMIT 1", (val,))
             row = cur.fetchone()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Lỗi truy vấn DB: {e}")
