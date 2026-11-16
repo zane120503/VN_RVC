@@ -2148,7 +2148,8 @@ def paginate_recorded_audio(
         codes = _CLUSTER_ALIASES.get(idCluster.upper(), [idCluster])
         conds.append("cluster_id = ANY(%s)"); params.append(codes)
     if roomCode:
-        conds.append("room_code = %s"); params.append(roomCode)
+        # Mã phòng trong DB luôn viết HOA; khách hay gõ thường (spv2) trên điện thoại
+        conds.append("room_code = %s"); params.append(roomCode.strip().upper())
     if startTime:
         t = _parse_local_time(startTime)
         if t: conds.append(f"{RECORD_TIME_SQL} >= %s"); params.append(t)
