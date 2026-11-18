@@ -260,8 +260,13 @@ def save_converted_song(task_id, customer_id, model_name, song_id, song_name, pi
                     (task_id, customer_id, model_name, song_id, song_name, pitch_shift,
                      result_path, result_object, file_size, record_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """, (task_id, customer_id, model_name, song_id, song_name, pitch_shift,
                       result_path, result_object, size, record_id))
+            conv_id = cur.fetchone()[0]
+        # Webhook gửi kèm conversion_id + stream_url để CRM phát đúng bản AI (không phải bản gốc)
+        if task_id in TASKS:
+            TASKS[task_id]["conversion_id"] = conv_id
         print(f"[DB] Đã lưu bản convert của khách {customer_id}: {result_path} (minio: {result_object})")
     except Exception as e:
         print(f"[DB] Lỗi lưu bản convert khách {customer_id}: {e}")
@@ -321,6 +326,11 @@ def _notify_task_done(task_id: str, kind: str, payload: dict):
         "song_id": payload.get("song_id"),
         "song_name": payload.get("song_name"),
         "download_url": f"{base}/download/{task_id}" if task.get("status") == "completed" else None,
+        # Bản AI đã lưu DB: conversion_id + link phát công khai (không cần API key, như bản thu gốc).
+        # /records/{record_id}/stream luôn là BẢN GỐC — muốn nghe bản AI phải dùng stream_url này.
+        "conversion_id": task.get("conversion_id"),
+        "stream_url": (f"{base}/api/shared/conversion/{task['conversion_id']}/stream"
+                       if task.get("conversion_id") and payload.get("record_id") else None),
         # Giờ UTC — CRM parse thời gian là UTC rồi tự +7 khi hiển thị
         "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
